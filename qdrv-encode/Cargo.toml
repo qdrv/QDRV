@@ -1,0 +1,15 @@
+[package]
+name                 = "qdrv-encode"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+description          = "QDRV encoder: mastering-to-delivery tier transcoding with ST 2094-based metadata generation"
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace  = true
+qdrv-core.workspace  = true
+qdrv-meta.workspace  = true
+
+[lints]
+workspace = true

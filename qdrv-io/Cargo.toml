@@ -1,0 +1,17 @@
+[package]
+name                   = "qdrv-io"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+description            = "QDRV binary container format: reader and writer for .qdrv32 and .qdrv64 files"
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace  = true
+serde.workspace      = true
+qdrv-core.workspace  = true
+qdrv-meta.workspace  = true
+qdrv-codec.workspace = true
+
+[lints]
+workspace = true

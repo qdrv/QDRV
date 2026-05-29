@@ -1,0 +1,13 @@
+[package]
+name                   = "qdrv-mux"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+description            = "QDRV ISOBMFF (MP4) container muxer for AV1 delivery streams"
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+[package]
+name                   = "qdrv-codec"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+description            = "QDRV codec layer: AV1 (rav1e + dav1d) for delivery, fpzip/ZFP for mastering"
+rust-version.workspace = true
+
+[features]
+default = []
+# Enable ZFP reversible-mode mastering compression.
+# Requires a C compiler. Provides the best compression ratio on 2D image data.
+zfp = ["dep:zfp-sys-cc"]
+
+[dependencies]
+thiserror.workspace = true
+qdrv-core.workspace = true
+fpzip-rs.workspace  = true
+rav1e.workspace     = true
+dav1d.workspace     = true
+# Optional ZFP reversible mode. Windows-compatible via cc crate (not cmake).
+zfp-sys-cc = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name                 = "qdrv-meta"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+description          = "QDRV metadata: ST 2094-based static and dynamic metadata structures with serde JSON support"
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace  = true
+serde.workspace      = true
+serde_json.workspace = true
+qdrv-core.workspace  = true
+sha2.workspace       = true
+hmac.workspace       = true
+subtle.workspace     = true
+
+[lints]
+workspace = true

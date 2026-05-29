@@ -1,0 +1,31 @@
+[package]
+name                   = "qdrv-tool"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+description            = "QDRV CLI tool: inspection, conversion, validation, and test-pattern generation"
+rust-version.workspace = true
+
+[[bin]]
+name = "qdrv"
+path = "src/main.rs"
+
+[features]
+default = []
+zfp = ["qdrv-codec/zfp"]
+
+[dependencies]
+clap.workspace        = true
+serde.workspace       = true
+serde_json.workspace  = true
+qdrv-core.workspace   = true
+qdrv-meta.workspace   = true
+qdrv-encode.workspace = true
+qdrv-decode.workspace = true
+qdrv-codec.workspace  = true
+qdrv-io.workspace     = true
+qdrv-mux.workspace    = true
+shell-words.workspace = true
+
+[lints]
+workspace = true

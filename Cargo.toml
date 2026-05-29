@@ -1,0 +1,81 @@
+[workspace]
+members = [
+    "qdrv-core",
+    "qdrv-meta",
+    "qdrv-encode",
+    "qdrv-decode",
+    "qdrv-codec",
+    "qdrv-io",
+    "qdrv-mux",
+    "qdrv-tool",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95.0"
+version = "0.1.0"
+license = "GPL-2.0"
+
+[workspace.lints.rust]
+# Lint groups need an explicit lower priority so individual lint overrides
+# below them are unambiguous to rustc/clippy (Cargo manifest schema rule).
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Individual crates in this workspace are not published to crates.io as
+# standalone library packages. The public artefact is the `qdrv` CLI binary,
+# and the README/LICENCE/documentation live at the workspace root rather than
+# being duplicated per-crate. We therefore opt out of the crates.io publication
+# checklist for per-crate `repository`/`readme`/`keywords`/`categories`, while
+# keeping the rest of `clippy::cargo` (multiple_crate_versions,
+# negative_feature_names, wildcard_dependencies, etc.) active.
+cargo_common_metadata = "allow"
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+debug = 1
+strip = "debuginfo"
+
+# ---------------------------------------------------------------------------
+# Workspace-level dependency declarations.
+# Versions are the latest stable as of Rust 1.95.0 (2026-05-22).
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+thiserror  = "2"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap       = { version = "4.6", features = ["derive", "env"] }
+rav1e      = { version = "0.8", default-features = false }
+dav1d      = "0.11"
+# Pure Rust fpzip port -- no C FFI, designed for Float64 floating-point arrays.
+fpzip-rs   = "0.1"
+# Optional ZFP reversible mode bindings (used by qdrv-codec when feature `zfp` is enabled).
+zfp-sys-cc = "0.2"
+sha2       = "0.11"
+# HMAC-SHA256 for the metadata manifest. Paired with sha2 0.11.
+hmac       = "0.13"
+# Constant-time byte comparison used outside of hmac::verify_slice paths.
+subtle     = "2"
+# Quote-aware argv splitter for external-command templates so paths with
+# spaces and operator characters can be expressed without re-introducing
+# shell-style interpretation in our code.
+shell-words = "1"
+
+# Workspace-internal crates.
+qdrv-core   = { path = "qdrv-core"   }
+qdrv-meta   = { path = "qdrv-meta"   }
+qdrv-encode = { path = "qdrv-encode" }
+qdrv-decode = { path = "qdrv-decode" }
+qdrv-codec  = { path = "qdrv-codec"  }
+qdrv-io     = { path = "qdrv-io"     }
+qdrv-mux    = { path = "qdrv-mux"    }

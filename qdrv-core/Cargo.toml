@@ -1,0 +1,13 @@
+[package]
+name               = "qdrv-core"
+version.workspace  = true
+edition.workspace  = true
+license.workspace  = true
+description        = "QDRV core types: IEEE 754 pixel types, SMPTE ST 2084 PQ transfer functions, ITU-R Rec. 2100 colour transforms"
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
