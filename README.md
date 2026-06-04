@@ -87,7 +87,7 @@ Workspace crates:
 | `qdrv-decode` | Tone mapping, v2 policy application, temporal anti-pumping, SDR fallback |
 | `qdrv-codec` | AV1 encode/decode (`rav1e` + `dav1d`), mastering compression (`fpzip`, optional `zfp`) |
 | `qdrv-io` | Container reader/writer, version enforcement, streaming read path, size bounds checks |
-| `qdrv-mux` | AV1-in-MP4 muxing with `stco`/`co64`, `mdat largesize`, and HDR `colr nclx` signalling |
+| `qdrv-mux` | AV1 in progressive/fragmented MP4, CMAF, IVF, and raw OBU; bounds-checked ISOBMFF demuxer; `stco`/`co64`, `mdat largesize`, HDR `colr nclx` signalling |
 | `qdrv-tool` | CLI entrypoint and operator-facing workflows |
 
 The repository also ships a `test-vectors/` data directory holding the
@@ -198,7 +198,8 @@ The `qdrv` binary currently exposes:
 - `convert <input> <output>`
 - `hdr10plus <input> <output>`
 - `inspect <file>`
-- `mux <input.qdrv32> <output.mp4>`
+- `mux <input.qdrv32> <output> [--format {mp4|fmp4|cmaf|ivf|obu}]`
+- `probe-stream <input>`
 - `export-interop <input> <output_dir>`
 - `manifest-sign <input> <output> {--key <key> | --key-file <path>} [--signer <signer>]`
 - `manifest-verify <input> <manifest> {--key <key> | --key-file <path>}`
@@ -264,8 +265,15 @@ qdrv convert master.qdrv64 delivery-v1.qdrv32 --container-version v1
 # Export HDR10 / HDR10+ / DV-compatible interop bundle
 qdrv export-interop delivery.qdrv32 out/
 
-# Mux a delivery-tier .qdrv32 into a standards-compliant .mp4 (AV1 + HDR `colr nclx`)
+# Mux a delivery-tier .qdrv32 into a standards-compliant container (AV1 + HDR `colr nclx`).
+# --format selects the target: mp4 (default, progressive), fmp4/cmaf (fragmented, keyframe-segmented
+# for DASH/HLS streaming), or ivf/obu (AV1 elementary streams for codec tooling).
 qdrv mux delivery.qdrv32 delivery.mp4 --frame-rate 24 --quantizer 40 --speed 6 --keyframe-interval 120
+qdrv mux delivery.qdrv32 delivery.cmaf --format cmaf --keyframe-interval 48
+
+# Read the embedded per-frame dynamic metadata back out of an exported stream.
+# QDRV carries it in-bitstream as ITU-T T.35 AV1 metadata OBUs, so it survives any container.
+qdrv probe-stream delivery.cmaf
 
 # Manifest and conformance workflow
 # Preferred (no secret in argv): set the key via env var or read from a file.
@@ -281,6 +289,29 @@ qdrv conformance-generate-open conformance/ --key-file /etc/qdrv/signing.key
 qdrv conformance-generate-open conformance/ --allow-public-default-key
 qdrv conformance-run conformance/conformance-manifest.json conformance-results/ --key-file /etc/qdrv/signing.key
 ```
+
+## Container and Streaming Interoperability
+
+The streams `qdrv mux` produces are standard AV1 with no QDRV-proprietary
+container framing — progressive ISOBMFF (`mp4`), fragmented MP4 / CMAF
+(`fmp4`/`cmaf`), and AV1 elementary streams (`ivf`/`obu`) — so they
+interoperate with the existing AV1 ecosystem rather than requiring
+QDRV-specific players. The per-frame QDRV dynamic metadata rides inside the
+AV1 bitstream as ITU-T T.35 metadata OBUs, so it travels with the stream
+through demuxing and repackaging untouched.
+
+Observed acceptance against standard tooling:
+
+- **ffmpeg / ffprobe** decode and identify every format as AV1 (Professional
+  profile, 12-bit 4:4:4, BT.2020 primaries, SMPTE ST 2084 transfer).
+- **dav1d** decodes the IVF and raw-OBU elementary streams.
+- **GPAC MP4Box** parses the MP4, fMP4, and CMAF outputs (`av01.2.04M.00`;
+  the CMAF output carries the `cmfc` brand).
+- **Shaka Packager** repackages the output into MPEG-DASH (`.mpd`) and HLS
+  (`.m3u8`) without re-encoding.
+
+These are manual interoperability checks against generated output, not part
+of the automated test gates.
 
 ## Conformance and Test Vectors
 

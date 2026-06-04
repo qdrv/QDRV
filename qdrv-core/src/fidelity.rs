@@ -8,6 +8,7 @@ use crate::{
         ncl::{KB, KG, KR},
     },
     pixel::Pixel32,
+    pq::pq_eotf_f32,
 };
 
 /// Core frame-level fidelity metrics.
@@ -87,7 +88,14 @@ pub fn compute_ssim(reference: &[f32], candidate: &[f32]) -> Option<f64> {
     Some((numerator / denominator).clamp(0.0, 1.0))
 }
 
-/// Computes average DeltaE76 between two Rec.2020 RGB signals.
+/// Computes the average CIE ΔE76 between two **linear-light** Rec. 2020 RGB
+/// signals.
+///
+/// The inputs must be linear light, **not** PQ-encoded: the CIELAB pipeline
+/// (`REC2020_TO_XYZ` → `xyz_to_lab`) is only colorimetrically valid on linear
+/// tristimulus values. Callers holding ST 2084 PQ signals must decode them
+/// with [`crate::pq::pq_eotf_f32`] first — see [`metrics_for_delivery_frame`],
+/// which does exactly that before calling this function.
 pub fn compute_delta_e76(reference: &[[f32; 3]], candidate: &[[f32; 3]]) -> Option<f64> {
     if reference.is_empty() || reference.len() != candidate.len() {
         return None;
@@ -107,7 +115,13 @@ pub fn compute_delta_e76(reference: &[[f32; 3]], candidate: &[[f32; 3]]) -> Opti
     Some(sum / reference.len() as f64)
 }
 
-/// Computes PSNR/SSIM/DeltaE76 for two delivery-tier frames.
+/// Computes PSNR/SSIM/ΔE76 for two delivery-tier frames.
+///
+/// PSNR and SSIM are evaluated on the Rec. 2100 NCL luma of the **PQ signal**,
+/// which is the correct domain for signal-fidelity metrics. ΔE76 is evaluated
+/// on the **PQ-decoded linear light** of each pixel, because CIELAB is only
+/// meaningful on linear tristimulus values; the reference white is the
+/// 10 000-nit ST 2084 ceiling (a linear value of `1.0`).
 pub fn metrics_for_delivery_frame(
     reference: &[Pixel32],
     candidate: &[Pixel32],
@@ -129,16 +143,15 @@ pub fn metrics_for_delivery_frame(
         let yc = kr * c.r + kg * c.g + kb * c.b;
         ref_luma.push(yr.clamp(0.0, 1.0));
         cand_luma.push(yc.clamp(0.0, 1.0));
-        ref_rgb.push([
-            r.r.clamp(0.0, 1.0),
-            r.g.clamp(0.0, 1.0),
-            r.b.clamp(0.0, 1.0),
-        ]);
-        cand_rgb.push([
-            c.r.clamp(0.0, 1.0),
-            c.g.clamp(0.0, 1.0),
-            c.b.clamp(0.0, 1.0),
-        ]);
+        // ΔE76 is a CIELAB metric and is only meaningful on linear-light
+        // tristimulus values. These channels are ST 2084 PQ-encoded, so decode
+        // them to normalised linear light (1.0 ≡ 10 000 nits) before the
+        // Rec. 2020 → XYZ → Lab conversion inside `compute_delta_e76`. The
+        // luma fed to PSNR/SSIM above intentionally stays in the PQ signal
+        // domain, which is the correct domain for those signal-fidelity
+        // metrics.
+        ref_rgb.push([pq_eotf_f32(r.r), pq_eotf_f32(r.g), pq_eotf_f32(r.b)]);
+        cand_rgb.push([pq_eotf_f32(c.r), pq_eotf_f32(c.g), pq_eotf_f32(c.b)]);
     }
 
     Some(FrameFidelityMetrics {
@@ -210,5 +223,40 @@ mod tests {
         let psnr = compute_psnr(&ref_sig, &cand_sig, 1.0).unwrap();
         assert!(psnr.is_finite());
         assert!(psnr < 50.0);
+    }
+
+    /// Regression guard for the ΔE76 domain fix: `metrics_for_delivery_frame`
+    /// must decode the ST 2084 PQ channels to linear light before the CIELAB
+    /// conversion, not feed the PQ signal straight into the linear-light
+    /// matrix. The previous code did the latter, which is not a valid ΔE76.
+    #[test]
+    fn delta_e76_is_computed_in_linear_light_not_pq_signal() {
+        // Two single-pixel frames differing only in the red PQ channel.
+        let a = Pixel32::new_unchecked(0.6, 0.5, 0.5);
+        let b = Pixel32::new_unchecked(0.5, 0.5, 0.5);
+        let metrics = metrics_for_delivery_frame(&[a], &[b]).unwrap();
+
+        // The reported ΔE76 must equal `compute_delta_e76` applied to the
+        // PQ-decoded (linear-light) channels — i.e. the decode happened.
+        let lin_a = [pq_eotf_f32(a.r), pq_eotf_f32(a.g), pq_eotf_f32(a.b)];
+        let lin_b = [pq_eotf_f32(b.r), pq_eotf_f32(b.g), pq_eotf_f32(b.b)];
+        let expected_linear = compute_delta_e76(&[lin_a], &[lin_b]).unwrap();
+        assert!(
+            (metrics.delta_e76 - expected_linear).abs() < 1e-9,
+            "ΔE76 must be computed on PQ-decoded linear light: got {}, expected {}",
+            metrics.delta_e76,
+            expected_linear
+        );
+
+        // And it must differ from the old (incorrect) signal-domain value,
+        // guarding against a regression back to feeding PQ signals straight
+        // into the linear-light CIELAB pipeline.
+        let signal_domain = compute_delta_e76(&[[a.r, a.g, a.b]], &[[b.r, b.g, b.b]]).unwrap();
+        assert!(
+            (metrics.delta_e76 - signal_domain).abs() > 1e-6,
+            "linear-light ΔE76 ({}) should differ from the PQ-signal-domain value ({})",
+            metrics.delta_e76,
+            signal_domain
+        );
     }
 }

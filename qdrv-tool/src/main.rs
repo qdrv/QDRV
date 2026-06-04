@@ -39,6 +39,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use qdrv_codec::{
     Av1Config, ChromaSampling420, EncodedPacket, GopConfig, MasteringCodec, TemporalEncoder,
+    av1_encode,
 };
 use qdrv_core::{
     pixel::Pixel64,
@@ -65,7 +66,9 @@ use qdrv_meta::{
         InverseToneMappingHint, LocalToneMapGrid, OpenDynamicMetadataV2, TemporalConstraint,
     },
 };
-use qdrv_mux::{Mp4Config, MuxFrame, write_mp4};
+use qdrv_mux::{
+    Mp4Config, MuxFrame, write_cmaf, write_fmp4, write_ivf, write_mp4, write_obu_stream,
+};
 
 use crate::{
     conformance::{OpenVectorsConfig, generate_open_vectors, run_conformance},
@@ -116,6 +119,24 @@ enum ContainerVersionArg {
     /// Container v2 — current writer default; accepts metadata schema
     /// v1 or v2 in the same container.
     V2,
+}
+
+/// Output container or elementary-stream format for `qdrv mux`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum MuxFormatArg {
+    /// Progressive MP4 (single-`mdat` ISOBMFF). Default; plays as a file in
+    /// any AV1-capable player.
+    Mp4,
+    /// Fragmented MP4: an initialisation segment plus keyframe-aligned media
+    /// segments, ready to split for adaptive streaming.
+    Fmp4,
+    /// CMAF (ISO/IEC 23000-19) — fragmented MP4 with brands accepted by both
+    /// MPEG-DASH and HLS packagers.
+    Cmaf,
+    /// IVF — the minimal AOM test container, for the AV1 reference tooling.
+    Ivf,
+    /// Raw AV1 OBU elementary stream (no container), for bitstream inspection.
+    Obu,
 }
 
 /// HDR10+ export profile mode CLI selector.
@@ -666,7 +687,7 @@ enum Commands {
         key_file: Option<PathBuf>,
     },
 
-    /// Mux a delivery-tier QDRV file (`.qdrv32`) into an `.mp4` ISOBMFF container.
+    /// Mux a delivery-tier QDRV file (`.qdrv32`) into a delivery container or AV1 elementary stream.
     ///
     /// The QDRV file's per-frame pixels are re-encoded as a temporally-predicted
     /// AV1 bitstream (12-bit 4:4:4, ITU-R Rec. 2020 primaries, SMPTE ST 2084 PQ
@@ -678,7 +699,8 @@ enum Commands {
         #[arg(value_name = "INPUT")]
         input: PathBuf,
 
-        /// Output `.mp4` file.
+        /// Output file. The container or elementary stream is selected by
+        /// `--format` (default `mp4`); pick a matching extension.
         #[arg(value_name = "OUTPUT")]
         output: PathBuf,
 
@@ -694,9 +716,28 @@ enum Commands {
         #[arg(long, default_value_t = 6)]
         speed: u8,
 
-        /// Maximum number of frames between AV1 keyframes (GOP length).
+        /// Maximum number of frames between AV1 keyframes (GOP length). Also
+        /// the media-segment boundary for the `fmp4`/`cmaf` formats.
         #[arg(long, default_value_t = 120)]
         keyframe_interval: u32,
+
+        /// Output format: `mp4` (progressive, default), `fmp4`/`cmaf`
+        /// (fragmented, keyframe-segmented for adaptive streaming), or
+        /// `ivf`/`obu` (AV1 elementary streams for codec tooling).
+        #[arg(long, value_enum, default_value = "mp4")]
+        format: MuxFormatArg,
+    },
+
+    /// Read embedded QDRV dynamic metadata back out of an exported stream:
+    /// MP4 / fragmented MP4 / CMAF, IVF (`.ivf`), or a raw AV1 OBU (`.obu`).
+    ///
+    /// QDRV carries per-frame dynamic metadata inside the AV1 bitstream as
+    /// ITU-T T.35 metadata OBUs, so it survives any container. This demuxes the
+    /// input as needed, extracts those OBUs, and prints a per-frame summary.
+    ProbeStream {
+        /// Input file: `.mp4` (progressive/fragmented/CMAF), `.ivf`, or raw `.obu`.
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
     },
 
     /// Generate deterministic open conformance vectors + manifest.
@@ -900,6 +941,7 @@ fn main() {
             quantizer,
             speed,
             keyframe_interval,
+            format,
         } => cmd_mux(
             &input,
             &output,
@@ -907,7 +949,9 @@ fn main() {
             quantizer,
             speed,
             keyframe_interval,
+            format,
         ),
+        Commands::ProbeStream { input } => cmd_probe_stream(&input),
         Commands::ConformanceGenerateOpen {
             output_dir,
             corpus_name,
@@ -1480,6 +1524,7 @@ fn cmd_mux(
     quantizer: usize,
     speed: u8,
     keyframe_interval: u32,
+    format: MuxFormatArg,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !frame_rate.is_finite() || frame_rate <= 0.0 {
         return Err(
@@ -1525,38 +1570,80 @@ fn cmd_mux(
         keyframe_interval,
         max_b_frames: 0,
     };
-    let mut encoder = TemporalEncoder::new(header.width, header.height, &av1_config, &gop_config)
-        .map_err(|e| format!("temporal encoder init failed: {e}"))?;
-
-    // Re-encode every decoded delivery frame through the temporal encoder,
-    // collecting packets as rav1e emits them. Mastering or raw-codec QDRV
+    // Re-encode every decoded delivery frame to AV1. Mastering or raw-codec QDRV
     // inputs are rejected above, so `frame.pixels.as_delivery()` must succeed.
     let mut packets: Vec<EncodedPacket> = Vec::new();
+    // Per-frame dynamic metadata, indexed by frame_index (the reader enforces
+    // `frame_index == stream position`), so each AV1 packet can be tagged with
+    // the metadata of the frame it encodes.
+    let mut dynamic_metas: Vec<qdrv_meta::DynamicMeta> = Vec::new();
     let mut sent_frames: u64 = 0;
-    while let Some(frame) = stream
-        .next_frame()
-        .map_err(|e| format!("read error at frame {}: {e}", sent_frames))?
-    {
-        let delivery = frame.pixels.as_delivery().ok_or_else(|| {
-            format!(
-                "frame {sent_frames}: delivery-tier file unexpectedly yielded \
-                 non-delivery pixels (codec={})",
-                header.codec
-            )
-        })?;
-        encoder
-            .send_frame(delivery)
-            .map_err(|e| format!("frame {sent_frames}: send_frame failed: {e}"))?;
-        sent_frames += 1;
-        let new_packets = encoder
-            .receive_packets()
-            .map_err(|e| format!("frame {sent_frames}: receive_packets failed: {e}"))?;
-        packets.extend(new_packets);
+
+    // Prefer the temporal/GOP encoder (inter-frame prediction, smaller output).
+    // rav1e's temporal path rejects some geometries that the still-picture path
+    // accepts (e.g. a very small frame such as a 16x4 fixture), and QDRV can
+    // legitimately produce such delivery files via `write-test`. When temporal
+    // initialisation fails, fall back to encoding each frame as an independent
+    // still picture so any valid `.qdrv32` can still be muxed.
+    match TemporalEncoder::new(header.width, header.height, &av1_config, &gop_config) {
+        Ok(mut encoder) => {
+            while let Some(frame) = stream
+                .next_frame()
+                .map_err(|e| format!("read error at frame {sent_frames}: {e}"))?
+            {
+                let delivery = frame.pixels.as_delivery().ok_or_else(|| {
+                    format!(
+                        "frame {sent_frames}: delivery-tier file unexpectedly yielded \
+                         non-delivery pixels (codec={})",
+                        header.codec
+                    )
+                })?;
+                encoder
+                    .send_frame(delivery)
+                    .map_err(|e| format!("frame {sent_frames}: send_frame failed: {e}"))?;
+                dynamic_metas.push(frame.dynamic_meta);
+                sent_frames += 1;
+                let new_packets = encoder
+                    .receive_packets()
+                    .map_err(|e| format!("frame {sent_frames}: receive_packets failed: {e}"))?;
+                packets.extend(new_packets);
+            }
+            packets.extend(
+                encoder
+                    .flush()
+                    .map_err(|e| format!("temporal encoder flush failed: {e}"))?,
+            );
+        }
+        Err(temporal_err) => {
+            eprintln!(
+                "note: temporal AV1 encoding unavailable for {}x{} ({temporal_err}); \
+                 encoding independent still pictures (larger output)",
+                header.width, header.height
+            );
+            while let Some(frame) = stream
+                .next_frame()
+                .map_err(|e| format!("read error at frame {sent_frames}: {e}"))?
+            {
+                let delivery = frame.pixels.as_delivery().ok_or_else(|| {
+                    format!(
+                        "frame {sent_frames}: delivery-tier file unexpectedly yielded \
+                         non-delivery pixels (codec={})",
+                        header.codec
+                    )
+                })?;
+                let data = av1_encode(delivery, header.width, header.height, &av1_config).map_err(
+                    |e| format!("frame {sent_frames}: still-picture encode failed: {e}"),
+                )?;
+                packets.push(EncodedPacket {
+                    data,
+                    frame_index: sent_frames,
+                    is_keyframe: true,
+                });
+                dynamic_metas.push(frame.dynamic_meta);
+                sent_frames += 1;
+            }
+        }
     }
-    let tail = encoder
-        .flush()
-        .map_err(|e| format!("temporal encoder flush failed: {e}"))?;
-    packets.extend(tail);
 
     if packets.is_empty() {
         return Err(format!(
@@ -1571,10 +1658,27 @@ fn cmd_mux(
     // so this is mostly defensive — but cheap.)
     packets.sort_by_key(|p| p.frame_index);
 
+    // Embed each frame's dynamic metadata into its AV1 temporal unit as a QDRV
+    // ITU-T T.35 metadata OBU, so every container/elementary target below
+    // carries the metadata inside the bitstream rather than via a sidecar.
     let mut mux_frames: Vec<MuxFrame> = Vec::with_capacity(packets.len());
     for pkt in packets {
+        let av1_data = match dynamic_metas.get(pkt.frame_index as usize) {
+            Some(meta) => {
+                let payload = qdrv_meta::binary::encode_dynamic_binary(meta).map_err(|e| {
+                    format!(
+                        "frame {}: dynamic metadata serialisation failed: {e}",
+                        pkt.frame_index
+                    )
+                })?;
+                qdrv_codec::embed_qdrv_metadata(&pkt.data, &payload).map_err(|e| {
+                    format!("frame {}: metadata OBU embed failed: {e}", pkt.frame_index)
+                })?
+            }
+            None => pkt.data,
+        };
         mux_frames.push(MuxFrame {
-            av1_data: pkt.data,
+            av1_data,
             is_keyframe: pkt.is_keyframe,
         });
     }
@@ -1594,8 +1698,21 @@ fn cmd_mux(
     let out_file = File::create(tmp_guard.path())
         .map_err(|e| format!("cannot create '{}': {e}", tmp_guard.path().display()))?;
     let mut out_writer = BufWriter::new(out_file);
-    write_mp4(&mut out_writer, &mp4_cfg, &mux_frames)
-        .map_err(|e| format!("mp4 mux failed: {e}"))?;
+    let format_label = match format {
+        MuxFormatArg::Mp4 => "mp4",
+        MuxFormatArg::Fmp4 => "fmp4",
+        MuxFormatArg::Cmaf => "cmaf",
+        MuxFormatArg::Ivf => "ivf",
+        MuxFormatArg::Obu => "obu",
+    };
+    match format {
+        MuxFormatArg::Mp4 => write_mp4(&mut out_writer, &mp4_cfg, &mux_frames),
+        MuxFormatArg::Fmp4 => write_fmp4(&mut out_writer, &mp4_cfg, &mux_frames),
+        MuxFormatArg::Cmaf => write_cmaf(&mut out_writer, &mp4_cfg, &mux_frames),
+        MuxFormatArg::Ivf => write_ivf(&mut out_writer, &mp4_cfg, &mux_frames),
+        MuxFormatArg::Obu => write_obu_stream(&mut out_writer, &mux_frames),
+    }
+    .map_err(|e| format!("{format_label} mux failed: {e}"))?;
     let out_file = out_writer
         .into_inner()
         .map_err(|e| format!("mp4 writer flush failed: {e}"))?;
@@ -1620,6 +1737,103 @@ fn cmd_mux(
         elapsed_ms
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// probe-stream
+// ---------------------------------------------------------------------------
+
+/// Reads embedded QDRV dynamic metadata back out of an exported AV1 elementary
+/// stream (`.obu`) or IVF (`.ivf`) file and prints a per-frame summary.
+fn cmd_probe_stream(input: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let data = fs::read(input).map_err(|e| format!("cannot read '{}': {e}", input.display()))?;
+    let metas = probe_stream_metas(&data)?;
+    if metas.is_empty() {
+        println!("No embedded QDRV metadata found in {}", input.display());
+        return Ok(());
+    }
+    println!(
+        "{}: embedded QDRV dynamic metadata for {} frame(s)",
+        input.display(),
+        metas.len()
+    );
+    for meta in &metas {
+        println!(
+            "  frame {:>5}: scene_peak={:.1} nits  scene_avg={:.1} nits  open_v2={}",
+            meta.frame_index,
+            meta.scene_peak_luminance_nits,
+            meta.scene_average_luminance_nits,
+            meta.open_dynamic_v2.is_some()
+        );
+    }
+    Ok(())
+}
+
+/// Detects the input format (ISOBMFF container, IVF, or raw OBU stream),
+/// recovers the AV1 samples, extracts the QDRV metadata OBUs, and decodes each
+/// into a [`qdrv_meta::DynamicMeta`]. Factored out of [`cmd_probe_stream`] so
+/// extraction is unit-testable without stdout capture.
+fn probe_stream_metas(data: &[u8]) -> Result<Vec<qdrv_meta::DynamicMeta>, String> {
+    let av1 = if data.len() >= 4 && &data[0..4] == b"DKIF" {
+        ivf_elementary_stream(data)?
+    } else if data.len() >= 8 && &data[4..8] == b"ftyp" {
+        qdrv_mux::extract_av1_samples(data).map_err(|e| format!("MP4 demux failed: {e}"))?
+    } else {
+        data.to_vec()
+    };
+
+    let payloads = qdrv_codec::extract_all_qdrv_metadata(&av1)
+        .map_err(|e| format!("failed to parse AV1 elementary stream: {e}"))?;
+    let mut metas = Vec::with_capacity(payloads.len());
+    for (i, payload) in payloads.iter().enumerate() {
+        let meta = qdrv_meta::binary::decode_dynamic_binary(payload)
+            .map_err(|e| format!("frame {i}: embedded metadata failed to decode: {e}"))?;
+        metas.push(meta);
+    }
+    Ok(metas)
+}
+
+/// Strips IVF framing, returning the concatenated AV1 temporal-unit bytes.
+fn ivf_elementary_stream(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() < 32 || &data[0..4] != b"DKIF" {
+        return Err("not a valid IVF file (missing DKIF header)".to_string());
+    }
+    let mut av1 = Vec::new();
+    let mut offset = 32usize;
+    while let Some(start) = offset.checked_add(12) {
+        if start > data.len() {
+            break;
+        }
+        let size = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| "IVF frame size overflow".to_string())?;
+        if end > data.len() {
+            return Err(format!(
+                "truncated IVF frame at offset {offset}: declares {size} bytes, \
+                 only {} remain",
+                data.len() - start
+            ));
+        }
+        av1.extend_from_slice(&data[start..end]);
+        offset = end;
+    }
+    // A well-formed IVF stream consumes exactly to its end. Any 1..11 bytes left
+    // over cannot form a complete 12-byte frame record, so the tail is truncated
+    // or corrupt and must be reported rather than silently accepted.
+    if offset != data.len() {
+        return Err(format!(
+            "{} trailing byte(s) after the last complete IVF frame: a frame \
+             record needs a full 12-byte header",
+            data.len() - offset
+        ));
+    }
+    Ok(av1)
 }
 
 // ---------------------------------------------------------------------------
@@ -2423,15 +2637,171 @@ mod tests {
                 quantizer,
                 speed,
                 keyframe_interval,
+                format,
                 ..
             } => {
                 assert!((frame_rate - 24.0).abs() < f64::EPSILON);
                 assert_eq!(quantizer, 40);
                 assert_eq!(speed, 6);
                 assert_eq!(keyframe_interval, 120);
+                assert_eq!(format, MuxFormatArg::Mp4, "default format must be mp4");
             }
             _ => panic!("unexpected command parsed"),
         }
+    }
+
+    #[test]
+    fn mux_cli_parses_every_format_variant() {
+        for (flag, expected) in [
+            ("mp4", MuxFormatArg::Mp4),
+            ("fmp4", MuxFormatArg::Fmp4),
+            ("cmaf", MuxFormatArg::Cmaf),
+            ("ivf", MuxFormatArg::Ivf),
+            ("obu", MuxFormatArg::Obu),
+        ] {
+            let cli =
+                Cli::try_parse_from(["qdrv", "mux", "in.qdrv32", "out.bin", "--format", flag])
+                    .unwrap_or_else(|e| panic!("--format {flag} must parse: {e}"));
+            match cli.command {
+                Commands::Mux { format, .. } => {
+                    assert_eq!(format, expected, "--format {flag}")
+                }
+                _ => panic!("unexpected command parsed"),
+            }
+        }
+        // An unknown format is rejected by clap.
+        assert!(
+            Cli::try_parse_from(["qdrv", "mux", "in.qdrv32", "out.bin", "--format", "webm"])
+                .is_err(),
+            "unknown --format must be rejected"
+        );
+    }
+
+    /// A synthetic AV1 temporal unit (temporal delimiter, sequence header,
+    /// frame), each in low-overhead size-field form — enough to exercise the
+    /// OBU walker and the metadata embed/extract path without invoking rav1e.
+    fn synthetic_av1_temporal_unit() -> Vec<u8> {
+        let mut tu = Vec::new();
+        tu.extend_from_slice(&[0x12, 0]); // temporal delimiter (type 2)
+        tu.extend_from_slice(&[0x0A, 3, 0xAA, 0xBB, 0xCC]); // sequence header (type 1)
+        tu.extend_from_slice(&[0x32, 4, 0x11, 0x22, 0x33, 0x44]); // frame (type 6)
+        tu
+    }
+
+    #[test]
+    fn probe_stream_reads_embedded_metadata_from_obu() {
+        let meta = qdrv_meta::DynamicMeta::new(7, 1234.0, 321.0);
+        let payload = qdrv_meta::binary::encode_dynamic_binary(&meta).unwrap();
+        let stream =
+            qdrv_codec::embed_qdrv_metadata(&synthetic_av1_temporal_unit(), &payload).unwrap();
+
+        let metas = probe_stream_metas(&stream).expect("probe must succeed");
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].frame_index, 7);
+        assert!((metas[0].scene_peak_luminance_nits - 1234.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn probe_stream_reads_metadata_through_ivf_framing() {
+        let meta = qdrv_meta::DynamicMeta::new(3, 800.0, 150.0);
+        let payload = qdrv_meta::binary::encode_dynamic_binary(&meta).unwrap();
+        let tu = qdrv_codec::embed_qdrv_metadata(&synthetic_av1_temporal_unit(), &payload).unwrap();
+
+        let mut ivf = vec![0u8; 32];
+        ivf[0..4].copy_from_slice(b"DKIF");
+        ivf.extend_from_slice(&(tu.len() as u32).to_le_bytes());
+        ivf.extend_from_slice(&0u64.to_le_bytes()); // frame timestamp
+        ivf.extend_from_slice(&tu);
+
+        let metas = probe_stream_metas(&ivf).expect("ivf probe must succeed");
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].frame_index, 3);
+    }
+
+    #[test]
+    fn probe_stream_reads_metadata_from_mp4_family() {
+        let meta = qdrv_meta::DynamicMeta::new(2, 1500.0, 400.0);
+        let payload = qdrv_meta::binary::encode_dynamic_binary(&meta).unwrap();
+        let tu = qdrv_codec::embed_qdrv_metadata(&synthetic_av1_temporal_unit(), &payload).unwrap();
+        let frames = vec![qdrv_mux::MuxFrame {
+            av1_data: tu,
+            is_keyframe: true,
+        }];
+        let cfg = qdrv_mux::Mp4Config::new(24.0, 16, 16);
+
+        let mut progressive = Vec::new();
+        qdrv_mux::write_mp4(&mut progressive, &cfg, &frames).unwrap();
+        let mut fragmented = Vec::new();
+        qdrv_mux::write_fmp4(&mut fragmented, &cfg, &frames).unwrap();
+        let mut cmaf = Vec::new();
+        qdrv_mux::write_cmaf(&mut cmaf, &cfg, &frames).unwrap();
+
+        for (label, bytes) in [
+            ("mp4", &progressive),
+            ("fmp4", &fragmented),
+            ("cmaf", &cmaf),
+        ] {
+            let metas = probe_stream_metas(bytes)
+                .unwrap_or_else(|e| panic!("{label} probe must succeed: {e}"));
+            assert_eq!(metas.len(), 1, "{label}");
+            assert_eq!(metas[0].frame_index, 2, "{label}");
+        }
+    }
+
+    #[test]
+    fn probe_stream_reports_empty_for_av1_without_metadata() {
+        let metas = probe_stream_metas(&synthetic_av1_temporal_unit()).expect("probe must succeed");
+        assert!(metas.is_empty());
+    }
+
+    /// L-01 regression (1008 audit): an IVF whose tail holds a partial,
+    /// sub-12-byte frame record must be rejected, not silently accepted as a
+    /// clean end of stream.
+    #[test]
+    fn ivf_parser_rejects_trailing_partial_frame_header() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"DKIF");
+        data.extend_from_slice(&[0u8; 28]); // remainder of the 32-byte IVF header
+        assert_eq!(data.len(), 32);
+        data.extend_from_slice(&[0u8; 5]); // 5 trailing bytes: not a full record header
+        let err = ivf_elementary_stream(&data).unwrap_err();
+        assert!(err.contains("trailing"), "got {err}");
+    }
+
+    /// Rough-edge fix: a tiny 16x4 delivery file — a geometry rav1e's temporal
+    /// path rejects but the still-picture path accepts — must still mux, via the
+    /// still-picture fallback in `cmd_mux`.
+    #[test]
+    fn mux_succeeds_on_tiny_delivery_via_still_picture_fallback() {
+        let root = make_temp_dir("mux-tiny-fallback");
+        let input = root.join("tiny.qdrv32");
+        let (w, h) = (16u32, 4u32);
+        let pixels =
+            vec![qdrv_core::pixel::Pixel32::new_unchecked(0.5, 0.5, 0.5); (w * h) as usize];
+        let static_meta = qdrv_meta::StaticMeta::default_delivery(1000.0, 400.0);
+        let av1_cfg = qdrv_codec::Av1Config {
+            speed: 10,
+            quantizer: 0,
+            lossless: true,
+            threads: 1,
+            chroma: qdrv_codec::ChromaSampling420::Cs444,
+        };
+        let frame = qdrv_io::writer::DeliveryFrame {
+            dynamic_meta: qdrv_meta::DynamicMeta::new(0, 1000.0, 400.0),
+            pixels,
+        };
+        {
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&input).unwrap());
+            qdrv_io::writer::write_delivery_file(&mut f, w, h, &static_meta, &[frame], &av1_cfg)
+                .unwrap();
+            std::io::Write::flush(&mut f).unwrap();
+        }
+        let output = root.join("tiny.mp4");
+        cmd_mux(&input, &output, 24.0, 40, 6, 120, MuxFormatArg::Mp4)
+            .expect("tiny delivery file must mux via still-picture fallback");
+        let bytes = std::fs::read(&output).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp", "output must be a valid MP4");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2475,8 +2845,8 @@ mod tests {
         writer.flush().expect("flush mastering fixture");
 
         let output = root.join("out.mp4");
-        let err =
-            cmd_mux(&input, &output, 24.0, 40, 6, 120).expect_err("mux must reject mastering tier");
+        let err = cmd_mux(&input, &output, 24.0, 40, 6, 120, MuxFormatArg::Mp4)
+            .expect_err("mux must reject mastering tier");
         let msg = format!("{err}");
         assert!(
             msg.contains("delivery-tier"),
@@ -2495,7 +2865,8 @@ mod tests {
         write_delivery_fixture_sized(&input, 2, 64, 64);
 
         let output = root.join("out.mp4");
-        cmd_mux(&input, &output, 24.0, 40, 6, 120).expect("mux should succeed on delivery input");
+        cmd_mux(&input, &output, 24.0, 40, 6, 120, MuxFormatArg::Mp4)
+            .expect("mux should succeed on delivery input");
 
         let bytes = fs::read(&output).expect("read produced mp4");
         // ISOBMFF `ftyp` box: size (4) + 'ftyp' (4) + major_brand 'isom' (4).

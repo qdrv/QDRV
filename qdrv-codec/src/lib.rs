@@ -35,6 +35,7 @@
 pub mod av1;
 pub mod compress;
 pub mod error;
+pub mod metadata_obu;
 pub mod temporal;
 
 pub use av1::{
@@ -46,4 +47,5 @@ pub use compress::{
     compress_frame as mastering_compress, decompress_frame as mastering_decompress,
 };
 pub use error::CodecError;
+pub use metadata_obu::{embed_qdrv_metadata, extract_all_qdrv_metadata, extract_qdrv_metadata};
 pub use temporal::{EncodedPacket, GopConfig, TemporalEncoder};

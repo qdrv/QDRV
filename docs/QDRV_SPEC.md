@@ -182,6 +182,7 @@ Implemented commands:
 - `hdr10plus`
 - `inspect`
 - `mux`
+- `probe-stream`
 - `export-interop`
 - `manifest-sign`
 - `manifest-verify`
@@ -195,11 +196,19 @@ Key implemented flags:
 - `hdr10plus`: `--mode {basic|advanced|adaptive|gaming}`, legacy `--advanced`
 - `inspect`: `--meta`, `--frames`, `--render-frame-time-ms`, `--render-target-max-nits`
 - `pq`: `--nits <NITS>` (nits → PQ), `--pq <PQ>` (PQ → nits); mutually exclusive
-- `mux`: `--frame-rate`, `--quantizer`, `--speed`, `--keyframe-interval`
+- `mux`: `--frame-rate`, `--quantizer`, `--speed`, `--keyframe-interval`, `--format {mp4|fmp4|cmaf|ivf|obu}`
+- `probe-stream`: positional input only (`.mp4`/fragmented/CMAF, `.ivf`, or raw `.obu`)
 - `export-interop`: `--dv-tool-cmd`
+- `manifest-sign`: `--key`, `--key-file`, `--signer`
+- `manifest-verify`: `--key`, `--key-file`
 - `conformance-generate-open`: `--key`, `--key-file`, `--allow-public-default-key`, `--signer`, `--corpus-name`, `--vectors`, `--width`, `--height`
+- `conformance-run`: `--key`, `--key-file`
 
-`mux` re-encodes a delivery-tier `.qdrv32` stream through the AV1 temporal/GOP encoder and writes a minimal ISOBMFF (`.mp4`) container with one video track. Output carries an HDR `colr` `nclx` box advertising BT.2020 primaries, SMPTE ST 2084 transfer, and BT.2020 NCL matrix coefficients. Mastering-tier inputs are rejected.
+`mux` re-encodes a delivery-tier `.qdrv32` stream through the AV1 temporal/GOP encoder and writes the result in the format selected by `--format`: a progressive ISOBMFF (`mp4`, the default), a fragmented ISOBMFF / CMAF stream segmented at keyframes for adaptive streaming (`fmp4`/`cmaf`), or a bare AV1 elementary stream (`ivf`/`obu`) for codec tooling. The ISOBMFF outputs carry an HDR `colr` `nclx` box advertising BT.2020 primaries, SMPTE ST 2084 transfer, and BT.2020 NCL matrix coefficients. Each frame's dynamic metadata is embedded in the AV1 bitstream as an ITU-T T.35 metadata OBU, so it travels with the stream into every container target. Mastering-tier inputs are rejected.
+
+`probe-stream` is the read-side counterpart: it demuxes an exported stream (progressive, fragmented, or CMAF MP4; IVF; or raw OBU), extracts the embedded ITU-T T.35 metadata OBUs, and prints a per-frame dynamic-metadata summary.
+
+The exported streams use only standard AV1 and ISOBMFF / CMAF structures, with no QDRV-proprietary container framing, and the dynamic metadata is carried in-bitstream as ITU-T T.35 AV1 metadata OBUs rather than in container-specific boxes. The outputs therefore interoperate with the standard AV1 toolchain: the progressive MP4, fragmented MP4, and CMAF outputs parse under GPAC MP4Box and decode under ffmpeg and dav1d; the fragmented MP4 / CMAF output packages into MPEG-DASH and HLS under Shaka Packager; and the IVF and raw-OBU elementary streams decode under dav1d. This is a design property — QDRV emits conformant AV1-in-ISOBMFF — not a certification claim, and these acceptance checks are run manually rather than as part of the gated test suite.
 
 ## 9. Current Limitations and External Dependencies
 

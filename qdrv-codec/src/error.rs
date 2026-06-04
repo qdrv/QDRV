@@ -65,4 +65,9 @@ pub enum CodecError {
     /// a recognised QDRV mastering codec.
     #[error("unrecognised mastering codec byte: {0}")]
     UnknownMasteringCodec(u8),
+
+    /// An AV1 metadata-OBU embed or extract operation failed (malformed
+    /// temporal unit, truncated OBU, or oversized payload).
+    #[error("AV1 metadata OBU error: {0}")]
+    MetadataObu(String),
 }

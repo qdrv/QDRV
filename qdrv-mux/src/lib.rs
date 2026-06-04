@@ -22,6 +22,14 @@
 
 use std::io::Write;
 
+pub mod demux;
+pub mod elementary;
+pub mod fragmented;
+
+pub use demux::extract_av1_samples;
+pub use elementary::{write_ivf, write_obu_stream};
+pub use fragmented::{write_cmaf, write_fmp4};
+
 /// MPEG-standard video track timescale that preserves exact integer deltas for
 /// common integer and NTSC-family frame rates.
 pub const DEFAULT_MP4_TIMESCALE: u32 = 90_000;
@@ -38,14 +46,45 @@ enum ChunkOffsetBox {
     Co64,
 }
 
-fn usize_to_u32(value: usize, context: &'static str) -> Result<u32, MuxError> {
+pub(crate) fn usize_to_u32(value: usize, context: &'static str) -> Result<u32, MuxError> {
     u32::try_from(value).map_err(|_| MuxError::SizeOverflow { context })
+}
+
+/// Computes the per-frame duration in `timescale` ticks for the given frame
+/// rate, validating that the result fits a `u32` sample-delta field and is at
+/// least one tick. Shared by the progressive ([`write_mp4`]) and fragmented
+/// writers so every container target derives timing identically.
+pub(crate) fn compute_frame_duration(timescale: u32, frame_rate: f64) -> Result<u32, MuxError> {
+    let frame_duration_f64 = (f64::from(timescale) / frame_rate).round();
+    if !frame_duration_f64.is_finite()
+        || frame_duration_f64 < 1.0
+        || frame_duration_f64 > f64::from(u32::MAX)
+    {
+        return Err(MuxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "computed frame_duration out of u32 range (timescale={timescale}, \
+                 frame_rate={frame_rate}, value={frame_duration_f64})"
+            ),
+        )));
+    }
+    let frame_duration = frame_duration_f64 as u32;
+    if frame_duration == 0 {
+        return Err(MuxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "computed frame_duration is 0 (timescale={timescale}, frame_rate={frame_rate}); \
+                 increase frame_rate or timescale"
+            ),
+        )));
+    }
+    Ok(frame_duration)
 }
 
 /// Computes `8 + payload_size` as a checked `u32` box size. Centralises the
 /// "ISOBMFF box header is 8 bytes, payload follows" arithmetic so every
 /// inner box gets the same overflow handling.
-fn box_size_u32(payload_size: usize, context: &'static str) -> Result<u32, MuxError> {
+pub(crate) fn box_size_u32(payload_size: usize, context: &'static str) -> Result<u32, MuxError> {
     let total = payload_size
         .checked_add(8)
         .ok_or(MuxError::SizeOverflow { context })?;
@@ -226,30 +265,7 @@ pub fn write_mp4<W: Write>(
     }
 
     let timescale: u32 = DEFAULT_MP4_TIMESCALE;
-    let frame_duration_f64 = (timescale as f64 / config.frame_rate).round();
-    if !frame_duration_f64.is_finite()
-        || frame_duration_f64 < 1.0
-        || frame_duration_f64 > u32::MAX as f64
-    {
-        return Err(MuxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "computed frame_duration out of u32 range (timescale={timescale}, frame_rate={}, value={frame_duration_f64})",
-                config.frame_rate
-            ),
-        )));
-    }
-    let frame_duration = frame_duration_f64 as u32;
-    if frame_duration == 0 {
-        return Err(MuxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "computed frame_duration is 0 (timescale={timescale}, frame_rate={}); \
-                 increase frame_rate or timescale",
-                config.frame_rate
-            ),
-        )));
-    }
+    let frame_duration = compute_frame_duration(timescale, config.frame_rate)?;
     let frame_count_u64 = u64::try_from(frames.len()).map_err(|_| MuxError::SizeOverflow {
         context: "frame count conversion to u64",
     })?;
@@ -328,6 +344,10 @@ pub enum MuxError {
     /// Integer conversion or arithmetic overflow while building box sizes and offsets.
     #[error("MP4 size overflow while computing {context}")]
     SizeOverflow { context: &'static str },
+    /// A demuxed ISOBMFF file was structurally malformed (missing required box,
+    /// truncated sample table, or a sample range running past the file).
+    #[error("malformed ISOBMFF: {0}")]
+    Malformed(String),
 }
 
 fn write_ftyp<W: Write>(w: &mut W) -> Result<(), MuxError> {
@@ -389,7 +409,7 @@ fn build_moov(
     Ok(moov)
 }
 
-fn build_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
+pub(crate) fn build_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
     let mut b = Vec::with_capacity(120);
     let size: u32 = 120;
     b.extend_from_slice(&size.to_be_bytes());
@@ -434,7 +454,7 @@ fn build_trak(
     Ok(trak)
 }
 
-fn build_tkhd(config: &Mp4Config, duration: u64) -> Vec<u8> {
+pub(crate) fn build_tkhd(config: &Mp4Config, duration: u64) -> Vec<u8> {
     let mut b = Vec::with_capacity(104);
     let size: u32 = 104;
     b.extend_from_slice(&size.to_be_bytes());
@@ -484,7 +504,7 @@ fn build_mdia(
     Ok(mdia)
 }
 
-fn build_mdhd(timescale: u32, duration: u64) -> Vec<u8> {
+pub(crate) fn build_mdhd(timescale: u32, duration: u64) -> Vec<u8> {
     let mut b = Vec::with_capacity(44);
     let size: u32 = 44;
     b.extend_from_slice(&size.to_be_bytes());
@@ -498,7 +518,7 @@ fn build_mdhd(timescale: u32, duration: u64) -> Vec<u8> {
     b
 }
 
-fn build_hdlr() -> Vec<u8> {
+pub(crate) fn build_hdlr() -> Vec<u8> {
     let name = b"QDRV Video\0";
     // hdlr box: size(4) + type(4) + version+flags(4) + pre_defined(4) +
     //           handler_type(4) + reserved(12) + name(variable)
@@ -540,7 +560,7 @@ fn build_minf(
     Ok(minf)
 }
 
-fn build_vmhd() -> Vec<u8> {
+pub(crate) fn build_vmhd() -> Vec<u8> {
     let mut b = Vec::with_capacity(20);
     b.extend_from_slice(&20u32.to_be_bytes());
     b.extend_from_slice(b"vmhd");
@@ -550,7 +570,7 @@ fn build_vmhd() -> Vec<u8> {
     b
 }
 
-fn build_dinf() -> Vec<u8> {
+pub(crate) fn build_dinf() -> Vec<u8> {
     // dinf > dref with one url entry (self-contained)
     let url_size: u32 = 12;
     let dref_size: u32 = 16 + url_size;
@@ -609,7 +629,7 @@ fn build_stbl(
     Ok(stbl)
 }
 
-fn build_stsd(config: &Mp4Config) -> Result<Vec<u8>, MuxError> {
+pub(crate) fn build_stsd(config: &Mp4Config) -> Result<Vec<u8>, MuxError> {
     let av1c = build_av1c();
     let colr = build_colr_nclx();
     // av01 sample entry: 8-byte box header + 78-byte VisualSampleEntry +
@@ -811,7 +831,12 @@ fn build_chunk_offset_box(kind: ChunkOffsetBox) -> Vec<u8> {
     }
 }
 
-fn find_child_box(data: &[u8], start: usize, end: usize, typ: &[u8; 4]) -> Option<(usize, usize)> {
+pub(crate) fn find_child_box(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    typ: &[u8; 4],
+) -> Option<(usize, usize)> {
     let mut cursor = start;
     while cursor.checked_add(8)? <= end {
         let size = u32::from_be_bytes(data[cursor..cursor + 4].try_into().ok()?) as usize;

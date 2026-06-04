@@ -402,6 +402,132 @@ pub struct OpenDynamicMetadataV2 {
     pub inverse_tone_mapping_hint: Option<InverseToneMappingHint>,
 }
 
+// =========================================================================
+// ROADMAP item 1 — Spatial metadata for 360° and immersive video (SKETCH)
+// =========================================================================
+//
+// This block is a non-binding design sketch for the first roadmap item in
+// `docs/ROADMAP.md`. It is intentionally a `//` comment, not `///` doc and
+// not source code: nothing here is wired into the type system, no field
+// here participates in `validate()`, and no caller may rely on the names
+// chosen below. Treat this as a placeholder that the eventual
+// implementation may refine, rename, or restructure.
+//
+// Goal
+// ----
+// Extend `OpenDynamicMetadataV2` so the existing per-region tone-mapping
+// infrastructure (`LocalToneMapGrid`, `ObjectMeta`, and the v2 scene
+// constraints) maps coherently onto spherical and equirectangular
+// projections used by 360° and immersive video pipelines.
+//
+// Why this earns the top slot
+// ---------------------------
+// 360° and head-mounted-display content has measurable adoption among
+// mastering and post-production teams who currently fall back to per-frame
+// manual grading because their tone-mapping tools assume rectilinear
+// projection. QDRV's per-region creative-intent model translates naturally
+// to spherical regions once the projection geometry is communicated
+// explicitly. This is a substantive content-category expansion that the
+// integer HDR ecosystem cannot match cleanly: HDR10 and HDR10+ have no
+// spatial vocabulary at all, and Dolby Vision's spatial metadata is
+// proprietary and gated behind certification.
+//
+// Technical surface
+// -----------------
+// 1. A new optional field on `OpenDynamicMetadataV2`, tentatively
+//    `spherical_projection: Option<SphericalProjection>`, where the enum
+//    covers at least equirectangular (ERP), cubemap, and equi-angular
+//    cubemap (EAC) layouts.
+//
+// 2. A new `SphericalRegion` shape in `qdrv-meta::object_meta` describing
+//    centre azimuth and elevation, angular width, and angular height,
+//    paired with the same `priority` and `tone_map_curve` fields the
+//    existing `ObjectRegion` already carries.
+//
+// 3. Decoder support in `qdrv-decode::object_tone_map` so the per-pixel
+//    lookup understands spherical coordinates rather than flat raster
+//    coordinates in [0.0, 1.0]^2.
+//
+// 4. Spec additions under `docs/QDRV_SPEC.md` documenting the projection
+//    enums, angular coordinate ranges, and the singularity behaviour at
+//    the poles.
+//
+// Dependencies and blockers
+// -------------------------
+// - A small reference corpus of spherical fixtures, beyond the current
+//   16 x 4 ramp test vectors, so the codec round-trip tests can validate
+//   the new path end-to-end without relying on operator-supplied content.
+//
+// - A decision on whether QDRV signals its own projection metadata or
+//   delegates to the MP4 `sv3d` and `proj` boxes for container-level
+//   interoperation. Delegation is preferable for muxer simplicity; an
+//   in-stream signalling field would let `.qdrv32` files declare
+//   projection without a container wrapper. The two paths are not
+//   mutually exclusive but the default behaviour should be settled
+//   before authoring begins.
+//
+// Estimated complexity
+// --------------------
+// Moderate. The metadata-schema changes are straightforward additive
+// extensions and follow the existing v2 pattern. The harder work is in
+// `qdrv-decode`, where the sampling kernel must account for spherical
+// distortion at the poles without introducing bias near the equator.
+//
+// Provisional shape (NOT compiled - illustrative only)
+// ----------------------------------------------------
+//
+//     /// Container-level projection used to interpret region coordinates.
+//     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+//     #[serde(rename_all = "snake_case")]
+//     pub enum SphericalProjection {
+//         /// Equirectangular projection.
+//         Equirectangular,
+//         /// Standard cubemap layout.
+//         Cubemap,
+//         /// Equi-angular cubemap layout.
+//         EquiAngularCubemap,
+//     }
+//
+//     /// A region defined on the unit sphere, angles in radians.
+//     ///
+//     /// `centre_azimuth` in [-PI, PI], `centre_elevation` in [-PI/2, PI/2],
+//     /// `angular_width` and `angular_height` strictly positive and bounded
+//     /// by the projection's pole-handling rules.
+//     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//     #[serde(deny_unknown_fields)]
+//     pub struct SphericalRegion {
+//         pub centre_azimuth: f32,
+//         pub centre_elevation: f32,
+//         pub angular_width: f32,
+//         pub angular_height: f32,
+//         pub priority: u16,
+//         pub tone_map_curve: Option<ToneMapCurve>,
+//     }
+//
+//     // Inside OpenDynamicMetadataV2 (additive field, default = None,
+//     // wired through validate() exactly like the other Option<_> fields):
+//     //
+//     //     #[serde(default)]
+//     //     pub spherical_projection: Option<SphericalProjection>,
+//
+// Open questions to settle before authoring begins
+// ------------------------------------------------
+// - Whether `SphericalRegion` lives alongside `ObjectRegion` in
+//   `object_meta.rs` or in a new `spherical.rs` module. The former keeps
+//   region kinds together; the latter keeps the flat-raster sampling
+//   kernel free of spherical-geometry imports.
+// - Whether priority ordering between `ObjectRegion` and `SphericalRegion`
+//   is shared (one global priority space) or kept disjoint (rectilinear
+//   regions win on rectilinear projections, spherical regions win on
+//   spherical projections). A single priority space is simpler but makes
+//   mixed-projection authoring tools harder to reason about.
+// - Pole behaviour: whether to clamp the sampling kernel at +/-PI/2 or to
+//   wrap longitude across the antimeridian. The decoder spec note in
+//   `docs/QDRV_SPEC.md` should pin this down before the first fixture
+//   is checked in, so the conformance vectors lock the chosen rule.
+//
+// =========================================================================
+
 impl OpenDynamicMetadataV2 {
     /// Validates all optional and required v2 substructures.
     pub fn validate(&self) -> Result<(), &'static str> {

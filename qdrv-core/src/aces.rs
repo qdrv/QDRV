@@ -110,9 +110,9 @@ pub mod ap1_primaries {
 /// Source: derived from the ACES AP0→XYZ matrix (SMPTE ST 2065-1), Bradford
 /// D60→D65 adaptation, and XYZ→Rec. 2020 matrix.
 pub const ACES_AP0_TO_REC2020: [[f64; 3]; 3] = [
-    [1.0258247, 0.0135235, -0.0325747],
-    [-0.0026793, 1.0048659, -0.0024872],
-    [-0.0050633, -0.0126553, 1.0490575],
+    [1.4904095, -0.2661709, -0.2242386],
+    [-0.0801675, 1.1821671, -0.1019996],
+    [0.0032276, -0.0347765, 1.0315488],
 ];
 
 /// Linear Rec. 2020 RGB → ACES AP0 (ACES2065-1), with D65→D60 Bradford
@@ -123,17 +123,17 @@ pub const ACES_AP0_TO_REC2020: [[f64; 3]; 3] = [
 /// in-gamut scene values (the published ACES CTL matrices round slightly
 /// differently from a strict matrix inverse).
 pub const REC2020_TO_ACES_AP0: [[f64; 3]; 3] = [
-    [0.9749414, -0.0127399, 0.0302431],
-    [0.0026112, 0.9951533, 0.0024405],
-    [0.0047371, 0.0119435, 0.9534120],
+    [0.6790856, 0.1577009, 0.1632135],
+    [0.0460020, 0.8590547, 0.0949433],
+    [-0.0005739, 0.0284678, 0.9721062],
 ];
 
 /// ACES AP1 (ACEScg) → linear Rec. 2020 RGB, with D60→D65 Bradford
 /// chromatic adaptation included.
 pub const ACES_AP1_TO_REC2020: [[f64; 3]; 3] = [
-    [0.9759234, 0.0191893, 0.0113007],
-    [-0.0023268, 1.0027219, -0.0001974],
-    [0.0028128, -0.0060072, 1.0346696],
+    [1.0258247, -0.0200532, -0.0057716],
+    [-0.0022344, 1.0045865, -0.0023521],
+    [-0.0050134, -0.0252901, 1.0303034],
 ];
 
 /// Linear Rec. 2020 RGB → ACES AP1 (ACEScg), with D65→D60 Bradford
@@ -142,9 +142,9 @@ pub const ACES_AP1_TO_REC2020: [[f64; 3]; 3] = [
 /// Coefficients are the numerical inverse of [`ACES_AP1_TO_REC2020`]; see
 /// [`REC2020_TO_ACES_AP0`] for why QDRV uses an explicit inverse here.
 pub const REC2020_TO_ACES_AP1: [[f64; 3]; 3] = [
-    [1.0246559, -0.0196761, -0.0111951],
-    [0.0023772, 0.9972410, 0.0001643],
-    [-0.0027718, 0.0058434, 0.9665235],
+    [0.9748950, 0.0195991, 0.0055059],
+    [0.0021796, 0.9955355, 0.0022850],
+    [0.0047972, 0.0245320, 0.9706707],
 ];
 
 /// Converts linear ACES AP0 (ACES2065-1) RGB to linear Rec. 2020 RGB.
@@ -227,5 +227,31 @@ mod tests {
         assert!((rec2020.0 - 1.0).abs() < 0.05, "R: {}", rec2020.0);
         assert!((rec2020.1 - 1.0).abs() < 0.05, "G: {}", rec2020.1);
         assert!((rec2020.2 - 1.0).abs() < 0.05, "B: {}", rec2020.2);
+    }
+
+    /// Absolute-reference guard. The round-trip tests above only prove that
+    /// each forward/inverse pair is a mutual inverse — a property that holds
+    /// for *any* invertible matrix pair, correct or not, and which previously
+    /// let a colorimetrically wrong (near-identity) AP0 matrix pass unnoticed.
+    /// These assertions instead pin the forward matrices to values derived
+    /// from the published ACES primaries with Bradford D60→D65 adaptation, so
+    /// a self-consistent-but-wrong matrix can no longer slip through.
+    #[test]
+    fn aces_forward_matrices_match_absolute_reference() {
+        // AP0 is a far wider gamut than Rec. 2020, so its forward matrix must
+        // carry strong off-diagonal terms: the AP0 red corner (1, 0, 0) maps
+        // well outside the Rec. 2020 unit cube. (A near-identity matrix — the
+        // original defect — would instead map it to ≈(1, 0, 0).)
+        let red = aces_ap0_to_rec2020((1.0, 0.0, 0.0));
+        assert!((red.0 - 1.4904095).abs() < 1e-4, "AP0→Rec2020 R: {}", red.0);
+        assert!((red.1 + 0.0801675).abs() < 1e-4, "AP0→Rec2020 G: {}", red.1);
+        assert!((red.2 - 0.0032276).abs() < 1e-4, "AP0→Rec2020 B: {}", red.2);
+
+        // AP1 (ACEScg) must match the canonical published ACEScg→Rec. 2020
+        // matrix to within rounding of the stored 7-digit coefficients.
+        let red = aces_ap1_to_rec2020((1.0, 0.0, 0.0));
+        assert!((red.0 - 1.0258247).abs() < 1e-4, "AP1→Rec2020 R: {}", red.0);
+        assert!((red.1 + 0.0022344).abs() < 1e-4, "AP1→Rec2020 G: {}", red.1);
+        assert!((red.2 + 0.0050134).abs() < 1e-4, "AP1→Rec2020 B: {}", red.2);
     }
 }

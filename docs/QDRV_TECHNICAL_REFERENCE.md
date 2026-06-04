@@ -34,6 +34,7 @@ Implemented commands:
 - `hdr10plus`
 - `inspect`
 - `mux`
+- `probe-stream`
 - `export-interop`
 - `manifest-sign`
 - `manifest-verify`
@@ -47,11 +48,17 @@ Key flags currently implemented:
 - `inspect`: `--meta`, `--frames`, `--render-frame-time-ms`, `--render-target-max-nits`
 - `hdr10plus`: `--mode {basic|advanced|adaptive|gaming}`, legacy `--advanced`
 - `pq`: `--nits <NITS>` (nits → PQ), `--pq <PQ>` (PQ → nits); mutually exclusive
-- `mux`: `--frame-rate`, `--quantizer`, `--speed`, `--keyframe-interval`
+- `mux`: `--frame-rate`, `--quantizer`, `--speed`, `--keyframe-interval`, `--format {mp4|fmp4|cmaf|ivf|obu}`
+- `probe-stream`: positional input only (`.mp4`/fragmented/CMAF, `.ivf`, or raw `.obu`)
 - `export-interop`: `--dv-tool-cmd`
+- `manifest-sign`: `--key`, `--key-file`, `--signer`
+- `manifest-verify`: `--key`, `--key-file`
 - `conformance-generate-open`: `--key`, `--key-file`, `--allow-public-default-key`, `--signer`, `--corpus-name`, `--vectors`, `--width`, `--height`
+- `conformance-run`: `--key`, `--key-file`
 
-The `mux` command reads a delivery-tier `.qdrv32` file, sends each decoded `Pixel32` frame through `qdrv-codec::TemporalEncoder` (rav1e in GOP mode, low-latency, 12-bit 4:4:4, BT.2020 NCL), collects the resulting AV1 packets in presentation order, and hands them to `qdrv-mux::write_mp4`. The output is a single-track ISOBMFF (`.mp4`) container with an HDR `colr nclx` box (BT.2020 primaries, SMPTE ST 2084 transfer, BT.2020 NCL matrix). Mastering-tier inputs are rejected at the top of `cmd_mux` before any rav1e initialisation, and the muxer automatically promotes `stco` → `co64` and `mdat` → `largesize` headers when offsets or payloads exceed the 32-bit ISOBMFF limits.
+The `mux` command reads a delivery-tier `.qdrv32` file, sends each decoded `Pixel32` frame through `qdrv-codec::TemporalEncoder` (rav1e in GOP mode, low-latency, 12-bit 4:4:4, BT.2020 NCL), collects the resulting AV1 packets in presentation order, embeds each frame's dynamic metadata into its temporal unit as an ITU-T T.35 metadata OBU (`qdrv-codec::embed_qdrv_metadata`), and writes the packets in the format chosen by `--format`. The default `mp4` path uses `qdrv-mux::write_mp4` (single-track progressive ISOBMFF with an HDR `colr nclx` box: BT.2020 primaries, SMPTE ST 2084 transfer, BT.2020 NCL matrix); `fmp4`/`cmaf` use `qdrv-mux::write_fmp4` / `write_cmaf` to emit an initialisation segment plus keyframe-aligned media segments (`moof`/`traf`/`trun`); and `ivf`/`obu` use `qdrv-mux::write_ivf` / `write_obu_stream` to emit bare AV1 elementary streams. Mastering-tier inputs are rejected at the top of `cmd_mux` before any rav1e initialisation, and the progressive muxer automatically promotes `stco` → `co64` and `mdat` → `largesize` headers when offsets or payloads exceed the 32-bit ISOBMFF limits.
+
+The `probe-stream` command is the read path: it detects the input format (ISOBMFF container, IVF, or raw OBU stream), recovers the AV1 samples via `qdrv-mux::extract_av1_samples` (a bounds-checked demuxer handling both progressive sample tables and `moof`/`trun` fragments), extracts the embedded metadata OBUs with `qdrv-codec::extract_all_qdrv_metadata`, decodes each with `qdrv-meta::binary::decode_dynamic_binary`, and prints a per-frame summary.
 
 ## 3. HDR10+ Profile Export Implementation
 
@@ -187,6 +194,27 @@ Current protections include:
   SMPTE ST 2084 transfer, BT.2020 NCL matrix, full pixel range) so MP4-
   level players that read HDR characteristics from the container — rather
   than parsing the AV1 OBU — see the correct interpretation
+
+### 7.5 External-tool interoperability
+
+The mux outputs are standard AV1-in-ISOBMFF / CMAF and AV1 elementary
+streams, so they interoperate with the established AV1 toolchain rather than
+requiring QDRV-specific readers. Observed acceptance against generated
+output:
+
+- `ffprobe` / `ffmpeg` identify and decode the `mp4`, `fmp4`, `cmaf`, `ivf`,
+  and `obu` outputs as AV1 (Professional profile, 12-bit 4:4:4, BT.2020
+  primaries, SMPTE ST 2084 transfer, BT.2020 NCL matrix).
+- `dav1d` decodes the IVF and raw-OBU elementary streams.
+- GPAC `MP4Box` parses the progressive MP4, fragmented MP4, and CMAF outputs
+  and reports the AV1 track (`av01.2.04M.00`; the CMAF output carries the
+  `cmfc` brand).
+- Shaka Packager repackages the progressive MP4 into MPEG-DASH (`.mpd`) and
+  HLS (`.m3u8`) without re-encoding, preserving the in-bitstream ITU-T T.35
+  metadata OBUs.
+
+These are manual interoperability observations against generated output, not
+part of the gated workspace test suite.
 
 ## 8. Limitations and External Dependencies
 

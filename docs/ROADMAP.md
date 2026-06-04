@@ -123,6 +123,27 @@ The roadmap is consultative, not contractual. Priorities will shift as operator 
 
 **Estimated complexity.** Small. The data structure is trivial and the workspace already has the lint and test scaffolding to integrate it. The time investment is in tuning the default window size against representative content and in writing fixture-based tests that exercise the low-frequency band specifically.
 
+## 7. AV2 delivery-tier codec support
+
+**Goal.** Add AV2 — the Alliance for Open Media's successor to AV1 — as an alternative delivery-tier codec alongside the current AV1 path, so a `.qdrv32` delivery stream can carry an AV2 bitstream once a production-grade Rust AV2 encoder exists, taking advantage of AV2's improved compression efficiency at equivalent perceptual quality.
+
+**Why this earns this slot.** AV2 is positioned to deliver materially better compression than AV1 at the same visual quality, which maps directly onto QDRV's delivery-tier mandate: smaller files for the same 12-bit 4:4:4 HDR content. It sits at the bottom of the list rather than higher for one decisive reason — the encoder side does not yet exist in a form QDRV can use. The decode ecosystem has moved first: rav2d, a BSD-2-Clause Rust AV2 decoder, is GPL-compatible and could eventually slot in beside the existing dav1d path. But rav1e is AV1-only, and there is no production-grade Rust AV2 encoder. Until that gap closes, QDRV could in principle read AV2 yet not produce it, which inverts the format's purpose. This is a watch-and-track item: progress is gated on an external dependency maturing, not on QDRV design effort.
+
+**Technical surface.**
+
+- A way for the delivery-tier container to signal an AV2 payload distinctly from AV1 — the header already carries a codec byte — so readers reject a codec they cannot decode rather than misparsing it as AV1.
+- A `qdrv-codec` encode path mirroring the current `av1` and `temporal` modules once a Rust AV2 encoder is available, holding the same 12-bit 4:4:4, Rec. 2020 primaries, SMPTE ST 2084 transfer contract the AV1 path already enforces.
+- A decode path wrapping rav2d behind the same buffer-reuse and error-handling shape as the existing dav1d integration in `qdrv-codec::av1`.
+- An assessment of whether the ITU-T T.35 metadata-OBU carriage in `qdrv-codec::metadata_obu` transfers to AV2 unchanged. AV2 inherits AV1's OBU framing, so the carriage is expected to port closely, but the OBU header layout, metadata type, and trailing-marker assumptions must be re-verified against the AV2 bitstream specification rather than assumed.
+
+**Dependencies and blockers.**
+
+- The binding blocker is a production-quality Rust AV2 encoder. rav1e does not encode AV2, and the reference AVM encoder is a C/C++ research codebase rather than a library QDRV would link against under its current pure-Rust-where-possible dependency policy. No substantive encode work begins until a viable Rust encoder exists and clears the same dependency scrutiny already applied to `fpzip-rs` and `zfp-sys-cc`.
+- rav2d is early-stage; its decode conformance and API stability need evaluation before it is wired into the verification gates. A decoder that cannot yet round-trip the full feature set QDRV emits is not a dependency QDRV can rely on.
+- AV2 support is strictly additive: it must not disturb the AV1 delivery path, which remains the default. The container's codec signalling and reader validation are the mechanism that keeps the two codecs from being confused.
+
+**Estimated complexity.** Currently unscoped, because it is gated on external tooling. Once a Rust AV2 encoder exists, the in-workspace integration mirrors the established AV1 path and is moderate; the real cost sits entirely outside QDRV, in the maturity of the Rust AV2 encode and decode ecosystem. Until that matures, this item stays in watch-and-track status rather than active development.
+
 ## Contribution scope
 
 Roadmap items are open to external contribution provided the proposal goes through a short design discussion before substantive code is written. The pattern that has worked elsewhere in this workspace is a short design note (one to three paragraphs) covering the metadata shape, the validation rules, and the test fixtures, posted as a draft pull request or as a discussion item, before any implementation lands.
