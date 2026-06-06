@@ -4,7 +4,7 @@ Author: Michael Lauzon <qdrv2026@gmail.com>
 
 **Version:** 0.1.0 (Working Draft)  
 **Licence:** GNU General Public Licence v2.0 (GPLv2)  
-**Language:** Rust (`edition = "2024"`, `rust-version = "1.95.0"`)
+**Language:** Rust (`edition = "2024"`, `rust-version = "1.96.0"`)
 
 QDRV (Quantum Dynamic Range Video) is an open, floating-point dynamic-range video format and toolchain — designed as a successor to integer HDR (HDR10, HDR10+) and to proprietary Dolby Vision packaging. It has two operational tiers:
 
@@ -136,7 +136,7 @@ The build requirements are intentionally conventional for Rust projects with nat
 
 ### Required toolchain
 
-- Rust stable `1.95.0` or newer
+- Rust stable `1.96.0` or newer
 - Cargo (bundled with Rust)
 - C toolchain suitable for native crates
 - `nasm` (recommended for AV1 build performance)

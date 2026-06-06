@@ -13,7 +13,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.96.0"
 version = "0.1.0"
 license = "GPL-2.0"
 
@@ -48,7 +48,7 @@ strip = "debuginfo"
 
 # ---------------------------------------------------------------------------
 # Workspace-level dependency declarations.
-# Versions are the latest stable as of Rust 1.95.0 (2026-05-22).
+# Versions are the latest stable as of Rust 1.96.0 (2026-05-28).
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
 thiserror  = "2"
