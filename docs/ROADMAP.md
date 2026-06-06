@@ -144,6 +144,26 @@ The roadmap is consultative, not contractual. Priorities will shift as operator 
 
 **Estimated complexity.** Currently unscoped, because it is gated on external tooling. Once a Rust AV2 encoder exists, the in-workspace integration mirrors the established AV1 path and is moderate; the real cost sits entirely outside QDRV, in the maturity of the Rust AV2 encode and decode ecosystem. Until that matures, this item stays in watch-and-track status rather than active development.
 
+## 8. AI-assisted dynamic-metadata authoring
+
+**Goal.** Add an optional machine-learning path that analyses a QDRV frame range and proposes dynamic metadata — `OpenDynamicMetadataV2` tone curves and `ObjectMeta` regions — so operators can start from a generated draft instead of authoring every scene and every region by hand. The inference would live in a feature-gated `qdrv-ai` sidecar crate that never becomes a core dependency and never touches the deterministic conversion or render paths, with all model output treated as an advisory suggestion the operator reviews and edits rather than a silent transform.
+
+**Why this earns this slot.** The dynamic-metadata model already exists — `OpenDynamicMetadataV2`, the tone-curve structures, and `ObjectMeta` are all implemented — but today every curve and every region is authored manually, which is the single most labour-intensive part of using QDRV well. A model that drafts that metadata is the one "add AI" idea that fits the format's actual architecture. It sits last for three reasons: it is a convenience layer rather than a format capability; its output cannot participate in the deterministic guarantees the rest of the toolchain makes, so it must be fenced off and strictly opt-in; and, like the AV2 item above, it is gated on an external artefact that does not yet exist — a model trained for QDRV's pixel domain.
+
+**Technical surface.**
+
+- A new feature-gated `qdrv-ai` companion crate that performs inference through `tract` — the pure-Rust ONNX engine from Sonos — rather than the `ort` ONNX Runtime wrapper. `tract` keeps the clean-build, offline-reproducible, and near-zero-`unsafe` properties the workspace depends on; `ort` links the native C++ ONNX Runtime and its FFI surface, which would expand the audit scope, break offline and reproducible builds, and end the workspace's current two-`unsafe`-block guarantee. The pure-Rust path is the design constraint here, not an implementation detail.
+- A `qdrv-tool` subcommand, tentatively `qdrv suggest-metadata`, that runs the model over a `.qdrv32` or `.qdrv64` frame range and writes an `OpenDynamicMetadataV2` or `ObjectMeta` JSON document through the same `.part.<pid>` atomic-replace pattern every other QDRV writer uses. The emitted document is explicitly marked as machine-suggested and remains subject to the existing creator-intent-lock semantics, so generated metadata can never silently override authored intent.
+- A pixel-domain contract: any model must operate on QDRV's actual data — 12-bit or floating-point HDR in PQ or linear light — not the 8-bit SDR range that off-the-shelf vision models assume. Inputs normalised to `[0.0, 1.0]` over an SDR distribution do not transfer to HDR content and would produce unusable suggestions.
+
+**Dependencies and blockers.**
+
+- The binding blocker is the model itself. No pre-trained network exists for the real task — reading HDR floating-point frames and proposing tone curves and regions — and SDR-domain models do not transfer. This requires either training a model on HDR-domain data or sourcing one, and is the direct analogue of the AV2 item's missing encoder: substantive design effort cannot begin until the external artefact exists.
+- Determinism. Inference is not bit-reproducible across hardware, thread counts, or runtime versions, so the feature must stay outside `--deterministic`, outside the fidelity-contract paths, and outside the default build. Its output is a draft for review, never a step in a reproducible transcode.
+- Model weights are large binary artefacts that do not belong in the repository or in the deterministic verification gates. The sidecar's tests must exercise the integration with tiny fixture models or by mocking the inference boundary, so the workspace gates stay fast and reproducible whether or not a real model is present.
+
+**Estimated complexity.** Currently unscoped, because — like AV2 — it is gated on external tooling, here a model trained for QDRV's HDR pixel domain. The in-workspace integration is moderate and mirrors patterns the codebase already uses: a feature-gated crate, a single `tract` inference call, and a tool subcommand emitting reviewable JSON. The genuine cost sits outside the workspace, in obtaining and validating a suitable model. Until one exists, this item stays in watch-and-track status rather than active development.
+
 ## Contribution scope
 
 Roadmap items are open to external contribution provided the proposal goes through a short design discussion before substantive code is written. The pattern that has worked elsewhere in this workspace is a short design note (one to three paragraphs) covering the metadata shape, the validation rules, and the test fixtures, posted as a draft pull request or as a discussion item, before any implementation lands.
