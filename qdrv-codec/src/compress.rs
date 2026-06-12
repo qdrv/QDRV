@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Lossless compression for the QDRV mastering tier.
 //!
 //! QDRV provides two mastering-tier lossless codecs:

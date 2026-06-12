@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Interoperability-first exporter models and explicit loss reporting.
 
 use serde::{Deserialize, Serialize};

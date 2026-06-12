@@ -138,4 +138,4 @@ Investigate writer/reader behavioural changes first (delivery AV1 path or master
 
 ## Licence
 
-These test vectors are released under the GNU General Public Licence v2.0 (GPLv2).
+These test vectors are released under the GNU General Public Licence v2.0 or later (GPLv2+).

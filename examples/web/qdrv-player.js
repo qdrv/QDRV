@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Demo glue and shared renderer for qdrv-decode-wasm. Build the wasm package
 // and serve this directory over HTTP first; see README.md.

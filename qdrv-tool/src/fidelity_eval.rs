@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Fidelity evaluation backends used by the `qdrv` CLI.
 //!
 //! This module computes in-repo metrics (PSNR/SSIM/DeltaE76) and optionally

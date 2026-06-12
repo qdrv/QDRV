@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! QDRV pixel types for both processing tiers.
 //!
 //! QDRV uses a two-tier pixel architecture:

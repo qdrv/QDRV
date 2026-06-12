@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! # qdrv-io
 //!
@@ -26,7 +26,7 @@
 //!
 //! ## Licence
 //!
-//! This crate is released under the GNU General Public Licence v2.0 (GPLv2).
+//! This crate is released under the GNU General Public Licence v2.0 or later (GPLv2+).
 
 pub mod container;
 pub mod error;

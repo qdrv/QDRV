@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Fragmented ISOBMFF (fMP4) and CMAF muxing for QDRV delivery streams.
 //!
 //! Where [`crate::write_mp4`] emits a single-`mdat` *progressive* file — valid

@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //
 // WebGPU compute-shader port of the QDRV per-pixel global tone map. It mirrors
 // `qdrv-decode::tone_map`'s per-channel pipeline: PQ EOTF -> normalise by the

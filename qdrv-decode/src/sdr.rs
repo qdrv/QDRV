@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! SDR fallback generation for QDRV delivery-tier streams.
 //!
 //! Tone-maps and gamut-maps QDRV delivery-tier pixels to 8-bit sRGB output

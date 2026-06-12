@@ -127,6 +127,6 @@ browser-runtime path validated in a browser rather than by the native gates.
 
 ## Licence
 
-GNU General Public Licence v2.0 (GPLv2).
+GNU General Public Licence v2.0 or later (GPLv2+).
 
 [WebCodecs]: https://developer.mozilla.org/docs/Web/API/WebCodecs_API

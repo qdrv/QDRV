@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! AV1 elementary-stream writers for developer and tooling workflows.
 //!
 //! These are deliberately minimal "containers" aimed at the people who *make*

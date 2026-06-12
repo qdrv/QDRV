@@ -16,7 +16,7 @@ resolver = "2"
 edition = "2024"
 rust-version = "1.96.0"
 version = "0.1.0"
-license = "GPL-2.0"
+license = "GPL-2.0-or-later"
 
 [workspace.lints.rust]
 # Lint groups need an explicit lower priority so individual lint overrides

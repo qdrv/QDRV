@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! QDRV dynamic-metadata carriage as AV1 metadata OBUs (ITU-T T.35).
 //!
 //! QDRV's per-frame dynamic metadata lives natively in the `.qdrv` container,

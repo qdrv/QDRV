@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! ACES (Academy Colour Encoding System) colour space transforms.
 //!
 //! Provides conversion matrices between ACES colour spaces and ITU-R Rec. 2020,

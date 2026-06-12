@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! QDRV CLI tool — `qdrv`.
 //!
@@ -457,7 +457,7 @@ fn resolve_mastering_codec(
                   Delivery codec   AV1 12-bit 4:4:4 (rav1e encoder, dav1d decoder)\n\
                   Mastering codecs fpzip (default, pure Rust)\n\
                                    ZFP reversible (optional feature, C FFI)\n\n\
-                  Licence: GNU General Public Licence v2.0 (GPLv2)"
+                  Licence: GNU General Public Licence v2.0 or later (GPLv2+)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -1212,7 +1212,7 @@ fn cmd_info() {
     println!("  PQ max luminance {PQ_MAX_NITS:.0} nits");
     println!("  Reference white  {REFERENCE_WHITE_NITS:.0} nits (ITU-R BT.2408)");
     println!();
-    println!("  Licence          GNU General Public Licence v2.0 (GPLv2)");
+    println!("  Licence          GNU General Public Licence v2.0 or later (GPLv2+)");
     println!("  Status           v0.1.0 Working Draft");
 }
 

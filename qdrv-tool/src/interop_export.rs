@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Interoperability bundle export for the `qdrv` CLI.
 //!
 //! Builds a practical hand-off bundle from QDRV input: HDR10 raw payload,

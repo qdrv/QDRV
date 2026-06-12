@@ -85,11 +85,32 @@ Implemented and verified. `TemporalStateManager` in `qdrv-decode::tone_map` now 
 
 The window is configured through the new optional `TemporalConstraint.integration_window_frames` field (`Option<u8>`), with a documented default of 12 frames when the field is absent; validation rejects an explicit zero. The interaction with `anti_pumping_strength` and the damping formula are documented in `docs/QDRV_TECHNICAL_REFERENCE.md` §5.4, and regression tests in `qdrv-decode::tone_map` compare windowed against non-windowed gain trajectories on drifting content. This entry is retained as a record of completed work.
 
-## 7. AI-assisted dynamic-metadata authoring
+## 7. QDRV Studio — native desktop application
+
+**Goal.** Build a standalone native desktop application — working name QDRV Studio — as the operator surface for the format: open mastering (`.qdrv64`) and delivery (`.qdrv32`) assets, inspect container and metadata state, view frames through the QDRV tone-mapping pipeline in a calibrated viewport, analyse the signal with nit-calibrated scopes (waveform, histogram, RGB parade, gamut plot, pixel probe), author and validate metadata with structured editors, compare source against output, and run exports and conformance checks from a job queue — all in one coherent workspace, with every operation recording input/output hashes and an equivalent `qdrv` CLI command for reproducibility.
+
+**Why this earns this slot.** Unlike the two items below it, this is buildable today: the windowing, GPU, and UI layers (`winit`, `wgpu`, `egui` or `iced`) and every piece of QDRV processing it needs already exist, so the blockers are decisions rather than missing external technology. It also carries the highest operator impact of the remaining items — the format currently has no native viewing or authoring surface beyond the CLI and the experimental browser demo, and a professional HDR format is judged by the tool its operators live in.
+
+**Technical surface.**
+
+- A separate repository consuming the qdrv crates as dependencies, not new members of this workspace. The GUI stack pulls a large, FFI-heavy dependency tree; keeping it out of this workspace preserves the format repo's lean gates, two-`unsafe`-block posture, and auditability.
+- A native Rust application: `winit` owns the windows and event loop; a dedicated renderer subsystem owns the `wgpu` device, frame textures, tone-map and overlay passes, and GPU scope reduction (compute passes that read back compact scope buffers rather than whole frames); the UI toolkit draws panels over the same `wgpu` frame.
+- The `egui`/`egui-wgpu` versus `iced`/`iced_wgpu` choice is made by building the same small prototype twice (viewport texture, frame stepping, metadata inspector, scope placeholder, background job row) and keeping whichever preserves render-loop ownership with less friction.
+- Phased delivery, each phase independently verifiable: application shell and file inspector; single-frame tone-mapped viewport; timeline with bounded decode queue and frame cache; GPU scopes; structured metadata authoring with validation and diff; export and conformance job queue.
+
+**Dependencies and blockers.**
+
+- Licensing groundwork is already in place: the workspace crates are licensed GPL-2.0-or-later, so the application can ship under GPL-3.0 and remain compatible with `winit` (Apache-2.0-only, which is incompatible with GPLv2-only and would have deadlocked the combination under the workspace's previous licence). The remaining licence work is a full transitive dependency audit of the GUI stack before implementation begins.
+- The toolkit spike described above must run before the application architecture is committed.
+- SDR preview ships first; true HDR swapchain output is isolated behind a display-output mode so it can be added without rewriting the renderer, and the UI always names the active mode rather than presenting an SDR preview as reference output.
+
+**Estimated complexity.** Large overall, but the phases are sized so the first two — the native shell with the file inspector, and the single-frame tone-mapped viewport — are moderate and already deliver a useful inspection tool on their own. Work happens in its own repository, so it does not touch this workspace's verification gates.
+
+## 8. AI-assisted dynamic-metadata authoring
 
 **Goal.** Add an optional machine-learning path that analyses a QDRV frame range and proposes dynamic metadata — `OpenDynamicMetadataV2` tone curves and `ObjectMeta` regions — so operators can start from a generated draft instead of authoring every scene and every region by hand. The inference would live in a feature-gated `qdrv-ai` sidecar crate that never becomes a core dependency and never touches the deterministic conversion or render paths, with all model output treated as an advisory suggestion the operator reviews and edits rather than a silent transform.
 
-**Why this earns this slot.** The dynamic-metadata model already exists — `OpenDynamicMetadataV2`, the tone-curve structures, and `ObjectMeta` are all implemented — but today every curve and every region is authored manually, which is the single most labour-intensive part of using QDRV well. A model that drafts that metadata is the one "add AI" idea that fits the format's actual architecture. Unlike AV2 (see item #8), the pure-Rust infrastructure for AI inference already exists through `tract` — the pure-Rust ONNX engine from Sonos — keeping the clean-build, offline-reproducible, and near-zero-`unsafe` properties the workspace depends on. The primary blocker is obtaining a model trained for QDRV's HDR pixel domain rather than building the integration layer itself.
+**Why this earns this slot.** The dynamic-metadata model already exists — `OpenDynamicMetadataV2`, the tone-curve structures, and `ObjectMeta` are all implemented — but today every curve and every region is authored manually, which is the single most labour-intensive part of using QDRV well. A model that drafts that metadata is the one "add AI" idea that fits the format's actual architecture. Unlike AV2 (see item #9), the pure-Rust infrastructure for AI inference already exists through `tract` — the pure-Rust ONNX engine from Sonos — keeping the clean-build, offline-reproducible, and near-zero-`unsafe` properties the workspace depends on. The primary blocker is obtaining a model trained for QDRV's HDR pixel domain rather than building the integration layer itself.
 
 **Technical surface.**
 
@@ -105,11 +126,11 @@ The window is configured through the new optional `TemporalConstraint.integratio
 
 **Estimated complexity.** Moderate once a suitable model exists. The in-workspace integration mirrors patterns the codebase already uses: a feature-gated crate, a single `tract` inference call, and a tool subcommand emitting reviewable JSON. Unlike AV2, the Rust infrastructure layer is available today; the remaining work is obtaining and validating a model trained for QDRV's HDR pixel domain.
 
-## 8. AV2 delivery-tier codec support
+## 9. AV2 delivery-tier codec support
 
 **Goal.** Add AV2 — the Alliance for Open Media's successor to AV1 — as an alternative delivery-tier codec alongside the current AV1 path, so a `.qdrv32` delivery stream can carry an AV2 bitstream once a production-grade Rust AV2 encoder exists, taking advantage of AV2's improved compression efficiency at equivalent perceptual quality.
 
-**Why this earns this slot.** AV2 is positioned to deliver materially better compression than AV1 at the same visual quality, which maps directly onto QDRV's delivery-tier mandate: smaller files for the same 12-bit 4:4:4 HDR content. However, it sits at the bottom of the list because the Rust encoder ecosystem does not yet exist in a form QDRV can use. The decode ecosystem has moved first: rav2d, a BSD-2-Clause Rust AV2 decoder, is GPL-compatible and could eventually slot in beside the existing dav1d path. But rav1e is AV1-only, and there is no production-grade Rust AV2 encoder. Until that gap closes, QDRV could in principle read AV2 yet not produce it, which inverts the format's purpose. Unlike AI (see item #7), where the pure-Rust infrastructure exists today through `tract`, AV2 has no viable pure-Rust encode path. This is a watch-and-track item: progress is gated on an external dependency maturing, not on QDRV design effort.
+**Why this earns this slot.** AV2 is positioned to deliver materially better compression than AV1 at the same visual quality, which maps directly onto QDRV's delivery-tier mandate: smaller files for the same 12-bit 4:4:4 HDR content. However, it sits at the bottom of the list because the Rust encoder ecosystem does not yet exist in a form QDRV can use. The decode ecosystem has moved first: rav2d, a BSD-2-Clause Rust AV2 decoder, is GPL-compatible and could eventually slot in beside the existing dav1d path. But rav1e is AV1-only, and there is no production-grade Rust AV2 encoder. Until that gap closes, QDRV could in principle read AV2 yet not produce it, which inverts the format's purpose. Unlike AI (see item #8), where the pure-Rust infrastructure exists today through `tract`, AV2 has no viable pure-Rust encode path. This is a watch-and-track item: progress is gated on an external dependency maturing, not on QDRV design effort.
 
 **Technical surface.**
 

@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! HDR10+ and HDR10+ Advanced (SMPTE ST 2094-40) sidecar metadata export.
 //!
 //! Maps QDRV Float32 per-frame dynamic metadata to the integer-valued fields

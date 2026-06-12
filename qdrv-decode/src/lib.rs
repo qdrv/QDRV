@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! # qdrv-decode
 //!
@@ -19,7 +19,7 @@
 //!
 //! ## Licence
 //!
-//! This crate is released under the GNU General Public Licence v2.0 (GPLv2).
+//! This crate is released under the GNU General Public Licence v2.0 or later (GPLv2+).
 
 pub mod object_tone_map;
 pub mod reconstruct;

@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Display-adaptive tone mapping for QDRV delivery-tier streams.
 //!
 //! Applies the per-frame SMPTE ST 2094-based tone mapping curve from QDRV

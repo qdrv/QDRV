@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! ITU-R Rec. 2100 / Rec. 2020 colour primaries, matrices, and gamut transforms.
 //!
 //! QDRV uses ITU-R Rec. 2100 (BT.2100) as its primary colour standard, which

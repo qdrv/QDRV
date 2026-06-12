@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Minimal ISOBMFF demuxer: recovers the AV1 sample bytes from an MP4.
 //!
 //! This is the read-side counterpart to [`crate::write_mp4`] /

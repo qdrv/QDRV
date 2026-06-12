@@ -6,7 +6,7 @@ Author: Michael Lauzon <qdrv2026@gmail.com>
 
 **Version:** 0.1.0 (First Public Release)  
 **Status:** Implementation-aligned profile  
-**Licence:** GNU General Public Licence v2.0 (GPLv2)
+**Licence:** GNU General Public Licence v2.0 or later (GPLv2+)
 
 ## 1. Scope
 

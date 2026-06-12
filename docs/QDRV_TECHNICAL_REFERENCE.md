@@ -6,7 +6,7 @@ Author: Michael Lauzon <qdrv2026@gmail.com>
 
 **Document version:** 0.1.0  
 **Container version:** default write v2; optional compatibility write v1; read support v1 and v2  
-**Licence:** GNU General Public Licence v2.0 (GPLv2)
+**Licence:** GNU General Public Licence v2.0 or later (GPLv2+)
 
 This technical reference tracks implemented behaviour only.
 

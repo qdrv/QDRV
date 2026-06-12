@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! SMPTE ST 2084 Perceptual Quantizer (PQ) transfer functions.
 //!
 //! This module implements the electro-optical transfer function (EOTF) and its

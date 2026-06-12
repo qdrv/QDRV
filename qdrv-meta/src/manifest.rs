@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Deterministic metadata manifest hashing and signing helpers.
 //!
 //! Signatures use HMAC-SHA256 (RFC 2104). The previous `"sha256-keyed"`

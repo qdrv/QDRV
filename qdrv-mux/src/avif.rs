@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! AVIF still-image ISOBMFF writer.
 //!
 //! The writer emits a single primary AV1 image item plus an optional QDRV JSON

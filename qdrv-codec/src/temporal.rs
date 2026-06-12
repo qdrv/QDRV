@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Temporal AV1 encoding for multi-frame QDRV delivery streams.
 //!
 //! Provides a stateful encoder that accepts delivery-tier frames and produces

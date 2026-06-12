@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Compact binary encoding for QDRV metadata.
 //!
 //! JSON metadata is human-readable but incurs serialisation overhead at high

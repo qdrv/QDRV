@@ -1,5 +1,5 @@
 // Author: Michael Lauzon <qdrv2026@gmail.com>
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Integration tests that generate and validate formal QDRV test vector scenarios.
 //!
