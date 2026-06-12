@@ -431,7 +431,7 @@ fn decompress_zfp(payload: &[u8], expected_pixels: usize) -> Result<Vec<Pixel64>
         return Err(zfp_err("trailing bytes after ZFP plane data"));
     }
 
-    // Audit M-1 (`AUDIT_REPORT.md` 2026-05-27): same defense-in-depth rule as
+    // Audit M-1 (`AUDIT_REPORT.md` 2026-05-27): same defence-in-depth rule as
     // `decompress_fpzip` — reject any NaN/Inf produced by a corrupted or
     // hand-crafted ZFP payload at the decode boundary rather than letting
     // the values flow into downstream `Vec<Pixel64>` consumers.

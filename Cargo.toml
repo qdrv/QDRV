@@ -8,6 +8,7 @@ members = [
     "qdrv-io",
     "qdrv-mux",
     "qdrv-tool",
+    "qdrv-decode-wasm",
 ]
 resolver = "2"
 
@@ -70,6 +71,13 @@ subtle     = "2"
 # spaces and operator characters can be expressed without re-introducing
 # shell-style interpretation in our code.
 shell-words = "1"
+# Pure-Rust OpenEXR reader/writer (`exrs` crate). Default rayon feature is
+# disabled for the CLI export path so ACES EXR writing does not pull in extra
+# scheduler surface unless a future feature explicitly opts into it.
+exr        = { version = "1.74", default-features = false }
+# WebAssembly bindings for the in-browser decode build (`qdrv-decode-wasm`);
+# only pulled in for the `wasm32` target, never for the native gates.
+wasm-bindgen = "0.2"
 
 # Workspace-internal crates.
 qdrv-core   = { path = "qdrv-core"   }

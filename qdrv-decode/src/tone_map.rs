@@ -95,12 +95,26 @@ impl Default for RenderPolicy {
 
 /// Stateful temporal controller for frame-sequence anti-pumping.
 ///
-/// Keep one instance per rendered stream and pass it across sequential
-/// `tone_map_frame_with_policy_and_state` calls.
-#[derive(Debug, Clone, Copy)]
+/// Keeps track of the rendering state across a sequence of frames to apply
+/// temporal stabilisation. This prevents visible luminance "pumping" or flickering
+/// behaviours when adapting colour curves dynamically.
+///
+/// Callers processing consecutive frame sequences should retain a single instance of
+/// this manager per stream and pass a mutable reference to it across successive
+/// tone-mapping operations.
+#[derive(Debug, Clone)]
 pub struct TemporalStateManager {
+    /// The global gain factor applied to the previous frame's luminance.
     last_global_gain: f32,
+    /// The average luminance of the previous output frame after gain correction.
     last_frame_luma: Option<f32>,
+    /// A sliding ring-buffer tracking the average input luminance of recent frames.
+    /// This buffer is utilised to compute running statistical aggregates.
+    luma_history: std::collections::VecDeque<f32>,
+    /// The computed statistical mean of average input luminance values within the current sliding window.
+    running_mean: f32,
+    /// The computed statistical variance of average input luminance values within the current sliding window.
+    running_variance: f32,
 }
 
 impl Default for TemporalStateManager {
@@ -108,6 +122,9 @@ impl Default for TemporalStateManager {
         Self {
             last_global_gain: 1.0,
             last_frame_luma: None,
+            luma_history: std::collections::VecDeque::new(),
+            running_mean: 0.0,
+            running_variance: 0.0,
         }
     }
 }
@@ -118,35 +135,50 @@ impl TemporalStateManager {
         *self = Self::default();
     }
 
+    /// Stabilises the global gain factor for the current frame by applying temporal constraint rules.
+    ///
+    /// This method enforces frame-to-frame gain delta limits and applies smoothing behaviours.
+    /// If an integration window is configured and has collected sufficient history (at least two frames),
+    /// the controller calculates the running standard deviation over the window. When this standard
+    /// deviation is below the stability threshold (`STABLE_LUMA_EPSILON`), the controller identifies the
+    /// shot as temporally stable. Under stable conditions, gain adjustments are damped proportionally
+    /// to the amount of variance in order to actively suppress slow, low-frequency luminance pumping.
+    ///
+    /// If the sliding window is disabled or has insufficient history, the algorithm falls back to a simpler,
+    /// single-frame step difference dampening logic.
+    ///
+    /// Once the stabilised gain is computed, the input average luminance of the current frame is appended
+    /// to the ring-buffer, and the sliding aggregates (mean and variance) are updated.
     fn stabilize_gain(
         &mut self,
         requested_gain: f32,
         frame_luma: f32,
         max_delta: f32,
         anti_pumping_strength: f32,
+        integration_window: usize,
     ) -> f32 {
         // Audit finding S-5: the following constants were previously inline
         // magic numbers. Documenting their role here keeps the production
         // control path inspectable.
         //
-        // - `STRENGTH_TO_SMOOTHING_SCALE` (0.85): caps the maximum
+        // - `STRENGTH_TO_SMOOTHING_SCALE` (0.85): Caps the maximum
         //   effective smoothing weight at 0.85, leaving 15% headroom so a
         //   `strength = 1.0` policy still admits some new-frame influence
         //   instead of locking the gain completely.
-        // - `MIN_SMOOTHING` (0.05): floor that prevents the smoothing
+        // - `MIN_SMOOTHING` (0.05): Floor that prevents the smoothing
         //   weight from collapsing to zero and producing single-frame
         //   pumping under near-maximum strength.
-        // - `MIN_ALLOWED_DELTA` (0.000_5): floor on the per-frame allowed
+        // - `MIN_ALLOWED_DELTA` (0.000_5): Floor on the per-frame allowed
         //   gain delta so a metadata-supplied `max_gain_delta_per_frame`
         //   of exactly 0 cannot freeze adaptation entirely.
-        // - `MIN_STABILIZED_GAIN` (0.35): hard floor on the stabilised
+        // - `MIN_STABILIZED_GAIN` (0.35): Hard floor on the stabilised
         //   gain. Below this value highlights are crushed to a degree the
         //   tone curve cannot recover from; the floor protects against
         //   pathological adaptation requests.
-        // - `STABLE_LUMA_EPSILON` (0.015): if frame-average luma changes
+        // - `STABLE_LUMA_EPSILON` (0.015): If frame-average luma changes
         //   by less than this threshold, the scene is "stable" and we
         //   damp large gain swings extra-hard (see below).
-        // - `STABLE_LUMA_DAMP` (0.5): when a stable scene asks for a
+        // - `STABLE_LUMA_DAMP` (0.5): When a stable scene asks for a
         //   gain swing larger than the per-frame budget, blend back
         //   toward the previous gain by 50% rather than letting the
         //   max-delta clamp alone govern the move.
@@ -167,7 +199,20 @@ impl TemporalStateManager {
             .clamp(prev_gain - allowed_delta, prev_gain + allowed_delta)
             .clamp(MIN_STABILIZED_GAIN, 1.0);
 
-        if let Some(prev_luma) = self.last_frame_luma {
+        // Apply multi-frame integration damping if the history is stable.
+        // If the running standard deviation over the sliding window is below
+        // the stable threshold, the scene is static and we damp gain changes
+        // proportionally. Otherwise, we fall back to standard single-frame damping.
+        if integration_window > 0 && self.luma_history.len() >= 2 {
+            let std_dev = self.running_variance.sqrt();
+            if std_dev < STABLE_LUMA_EPSILON {
+                // Blend delta back toward prev_gain proportionally based on the stability of the window.
+                let damp_factor =
+                    1.0 - (1.0 - STABLE_LUMA_DAMP) * (1.0 - std_dev / STABLE_LUMA_EPSILON);
+                smoothed = prev_gain + (smoothed - prev_gain) * damp_factor;
+            }
+        } else if let Some(prev_luma) = self.last_frame_luma {
+            // Fall back to single-frame stability damping if history is insufficient.
             let luma_delta = (frame_luma - prev_luma).abs();
             if luma_delta < STABLE_LUMA_EPSILON
                 && (requested_gain - prev_gain).abs() > allowed_delta
@@ -177,7 +222,32 @@ impl TemporalStateManager {
         }
 
         self.last_global_gain = smoothed;
-        self.last_frame_luma = Some(frame_luma * smoothed);
+        let output_luma = frame_luma * smoothed;
+        self.last_frame_luma = Some(output_luma);
+
+        // Update the ring-buffer with the input luminance of the current frame.
+        if integration_window > 0 {
+            while self.luma_history.len() >= integration_window {
+                self.luma_history.pop_front();
+            }
+            self.luma_history.push_back(frame_luma);
+
+            let n = self.luma_history.len() as f32;
+            let mean = self.luma_history.iter().sum::<f32>() / n;
+            let variance = self
+                .luma_history
+                .iter()
+                .map(|&val| {
+                    let diff = val - mean;
+                    diff * diff
+                })
+                .sum::<f32>()
+                / n;
+
+            self.running_mean = mean;
+            self.running_variance = variance;
+        }
+
         smoothed
     }
 }
@@ -445,6 +515,10 @@ fn apply_temporal_gaming_controller(
         .max(0.0)
         .min(v2.temporal.max_global_gain_delta_per_frame.max(0.0));
 
+    // Retrieve the configured integration window size for multi-frame anti-flicker.
+    // If not explicitly configured, fall back to the default window size of 12 frames.
+    // This value is passed into the temporal state manager to regulate the sliding history buffer.
+    let integration_window = v2.temporal.integration_window_frames.unwrap_or(12) as usize;
     let stabilized_gain = state.stabilize_gain(
         requested_gain,
         frame_luma,
@@ -452,6 +526,7 @@ fn apply_temporal_gaming_controller(
         gaming
             .anti_pumping_strength
             .max(v2.temporal.anti_pumping_strength),
+        integration_window,
     );
 
     for p in pixels {
@@ -684,6 +759,7 @@ mod tests {
             ambient_policy: None,
             gaming_profile: None,
             inverse_tone_mapping_hint: None,
+            spherical_projection: None,
         });
 
         // 2x4 frame: top row (y=0) and bottom row (y=1) at the same column.
@@ -721,6 +797,7 @@ mod tests {
                 max_global_gain_delta_per_frame: 0.04,
                 anti_pumping_strength: 0.8,
                 frame_time_budget_ms: Some(8.3),
+                integration_window_frames: None,
             },
             local_tone_map_grid: None,
             adaptation_layer: None,
@@ -731,6 +808,7 @@ mod tests {
                 max_gain_delta_per_frame: 0.04,
             }),
             inverse_tone_mapping_hint: None,
+            spherical_projection: None,
         });
 
         let pixels = vec![Pixel32::new_unchecked(0.75, 0.75, 0.75); 16];
@@ -764,5 +842,57 @@ mod tests {
         let gain_a = out_a[0].r / pixels[0].r;
         let gain_b = out_b[0].r / pixels[0].r;
         assert!((gain_b - gain_a).abs() <= 0.041);
+    }
+
+    #[test]
+    fn test_multiframe_integration_buffer_suppresses_low_frequency_drift() {
+        let mut state_no_window = TemporalStateManager::default();
+        let mut state_with_window = TemporalStateManager::default();
+
+        let anti_pumping_strength = 0.8;
+        let max_delta = 0.05;
+        let frame_luma = 0.5;
+
+        let mut gains_no_window = Vec::new();
+        let mut gains_with_window = Vec::new();
+
+        // Simulate a gradual requested gain drift over 20 frames
+        for i in 0..20 {
+            let requested_gain = 1.0 - 0.015 * i as f32;
+
+            let gain_no = state_no_window.stabilize_gain(
+                requested_gain,
+                frame_luma,
+                max_delta,
+                anti_pumping_strength,
+                0, // disabled
+            );
+            gains_no_window.push(gain_no);
+
+            let gain_with = state_with_window.stabilize_gain(
+                requested_gain,
+                frame_luma,
+                max_delta,
+                anti_pumping_strength,
+                12, // integration window
+            );
+            gains_with_window.push(gain_with);
+        }
+
+        // The final gain with integration window should have drifted significantly less
+        // (remained closer to 1.0) than the one without the window.
+        let final_gain_no = gains_no_window.last().unwrap();
+        let final_gain_with = gains_with_window.last().unwrap();
+
+        assert!(
+            final_gain_with > final_gain_no,
+            "Expected integration window to suppress drift: with={final_gain_with}, no={final_gain_no}"
+        );
+
+        // Check that the difference in drift is clear (e.g. at least 0.02)
+        assert!(
+            (final_gain_with - final_gain_no) > 0.02,
+            "Expected significant suppression: with={final_gain_with}, no={final_gain_no}"
+        );
     }
 }

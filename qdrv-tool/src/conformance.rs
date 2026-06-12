@@ -162,7 +162,7 @@ pub(crate) fn generate_open_vectors(
             .ok_or_else(|| "generated vector has no frames".to_string())?;
         let dynamic_json = serde_json::to_string_pretty(&first_dynamic)
             .map_err(|e| format!("failed serializing dynamic metadata: {e}"))?;
-        // L-1 (`AUDIT_REPORT.md` 2026-05-27): every conformance artifact now
+        // L-1 (`AUDIT_REPORT.md` 2026-05-27): every conformance artefact now
         // goes through the atomic-temp + rename + fsync helper so an
         // interrupted generator run cannot leave a half-written JSON file
         // masquerading as a complete one. Same code path as

@@ -6,67 +6,42 @@ This document tracks proposed future work for QDRV. It is implementation-first: 
 
 The roadmap is consultative, not contractual. Priorities will shift as operator feedback arrives, as external dependencies stabilise, and as time and resources allow. The verification gates documented elsewhere in the project — `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and the full `cargo test --workspace` suite under both default and `qdrv-codec/zfp` feature configurations — remain non-negotiable for any feature listed here. Nothing ships until those gates pass cleanly and any new behaviour carries regression coverage in line with the patterns already established in the workspace.
 
-## 1. Spatial metadata for 360° and immersive video
+## 1. Spatial metadata for 360° and immersive video — shipped
 
-**Goal.** Extend `OpenDynamicMetadataV2` so the existing per-region tone-mapping infrastructure (`LocalToneMapGrid`, `ObjectMeta`, and the v2 scene constraints) maps coherently onto spherical and equirectangular projections used by 360° and immersive video pipelines.
+Implemented and verified. `qdrv-meta` provides the `SphericalProjection` enum, the `SphericalRegion` type, the stream-level `OpenDynamicMetadataV2.spherical_projection` field, and the per-frame `ObjectMeta.spherical_regions` field; `qdrv-decode::object_tone_map` un-projects each pixel and applies the highest-priority spherical region, with equirectangular, cubemap, and equi-angular cubemap layouts all supported (longitude wraps across the antimeridian; latitude is pole-bounded). The projection enums, angular ranges, and pole/seam rules are documented in `docs/QDRV_SPEC.md` §5.4 and `docs/QDRV_TECHNICAL_REFERENCE.md` §5.3, and a checked-in fixture (`test-vectors/spherical-region.objectmeta.json`) exercises the path end-to-end. The planning-stage decision on signalling was settled in favour of the in-stream metadata field; container-level `sv3d`/`proj` delegation remains an optional future addition. This entry is retained as a record of completed work.
 
-**Why this earns the top slot.** 360° and head-mounted-display content has measurable adoption among mastering and post-production teams who currently fall back to per-frame manual grading because their tone-mapping tools assume rectilinear projection. QDRV's per-region creative-intent model translates naturally to spherical regions once the projection geometry is communicated explicitly. This is a substantive content-category expansion that the integer HDR ecosystem cannot match cleanly: HDR10 and HDR10+ have no spatial vocabulary at all, and Dolby Vision's spatial metadata is proprietary and gated behind certification.
+## 2. WebAssembly build of `qdrv-decode` for in-browser playback — shipped
 
-**Technical surface.**
+Implemented and verified on the Rust side; the browser-runtime layer is validated in a browser rather than by the native gates. The `qdrv-decode-wasm` companion crate is codec-free by design (the browser's WebCodecs `VideoDecoder` decodes the AV1 payload) and exposes a small `wasm-bindgen` surface: `tone_map_frame` (the full per-frame tone map, including the flat and 360°/immersive per-region paths from item 1), `yuv_ncl_to_pq_rgb` (the BT.2020 non-constant-luminance bridge from a decoded 4:4:4 Y'CbCr frame to PQ RGB), `build_tone_curve_lut` (a CPU-evaluated lookup table so the GPU path matches the native curve evaluation exactly), `extract_stream_metadata` (in-bitstream ITU-T T.35 recovery through the pure-Rust OBU parser, which `qdrv-codec` now exposes under `--no-default-features`), `parse_qdrv32_container` (a fully bounds-checked delivery-container parser for direct `.qdrv32` playback), and `wrap_av1_still_as_avif` (which wraps a `.qdrv32` AV1 still-picture payload as a single-image AVIF so browser still-image decoders can play it where `VideoDecoder` rejects still-picture temporal units). The per-pixel tone map also runs as a WebGPU compute shader (`examples/web/tone-map.wgsl`) with the wasm path as its fallback, and `examples/web/` carries both the synthetic demo page and the experimental WebCodecs player for IVF and `.qdrv32` inputs.
 
-- A new optional field on `OpenDynamicMetadataV2`, tentatively `spherical_projection: Option<SphericalProjection>`, where the enum covers at least equirectangular (ERP), cubemap, and equi-angular cubemap (EAC) layouts.
-- A new `SphericalRegion` shape in `qdrv-meta::object_meta` describing centre azimuth and elevation, angular width, and angular height, paired with the same `priority` and `tone_map_curve` fields the existing `ObjectRegion` already carries.
-- Decoder support in `qdrv-decode::object_tone_map` so the per-pixel lookup understands spherical coordinates rather than flat raster coordinates in `[0.0, 1.0]²`.
-- Spec additions under `docs/QDRV_SPEC.md` documenting the projection enums, angular coordinate ranges, and the singularity behaviour at the poles.
+The remaining caveat is environmental, not architectural: playback of real streams depends on the browser decoding AV1 Professional profile (12-bit 4:4:4); browsers limited to 8-bit 4:2:0 AV1 reject the stream at `VideoDecoder.configure()`. The target-independent core is unit-tested under the normal workspace gates, and the wasm32 build compiles warning-free. This entry is retained as a record of completed work.
 
-**Dependencies and blockers.**
-
-- A small reference corpus of spherical fixtures, beyond the current `16 × 4` ramp test vectors, so the codec round-trip tests can validate the new path end-to-end without relying on operator-supplied content.
-- A decision on whether QDRV signals its own projection metadata or delegates to the MP4 `sv3d` and `proj` boxes for container-level interoperation. Delegation is preferable for muxer simplicity; an in-stream signalling field would let `.qdrv32` files declare projection without a container wrapper. The two paths are not mutually exclusive but the default behaviour should be settled before authoring begins.
-
-**Estimated complexity.** Moderate. The metadata-schema changes are straightforward additive extensions and follow the existing v2 pattern. The harder work is in `qdrv-decode`, where the sampling kernel must account for spherical distortion at the poles without introducing bias near the equator.
-
-## 2. WebAssembly build of `qdrv-decode` for in-browser playback
-
-**Goal.** Ship a WebAssembly build of `qdrv-decode` and a thin JavaScript wrapper so a QDRV delivery-tier `.qdrv32` file can be played directly in a browser via the WebCodecs API and WebGPU compute shaders, without requiring a server-side conversion step or a desktop installation.
-
-**Why this earns the second slot.** The browser is the most consequential video-distribution surface for open formats. A QDRV delivery file that plays in Chrome, Firefox, or Safari with no plug-in installation removes the single largest adoption barrier the format currently has: operators today need a desktop tool to view their own output, which is a real friction for sharing samples, demonstrating workflows, or embedding QDRV in web-based review pipelines. WebCodecs already exposes AV1 decoding in the major browsers; the missing piece is the QDRV metadata layer and the per-pixel tone-mapping kernel.
-
-**Technical surface.**
-
-- A `qdrv-decode-wasm` companion crate (or a `wasm32-unknown-unknown` cargo target on the existing crate) that exposes a small `wasm-bindgen` surface for parsing QDRV containers and producing tone-mapped frames.
-- Replacement of the `rav1e`/`dav1d` AV1 paths with the browser-supplied `VideoDecoder` (WebCodecs) interface, since the native codecs do not build for `wasm32` and would dominate the artefact size even if they did.
-- A WebGPU compute-shader equivalent of `qdrv-decode::tone_map::tone_map_frame` so the per-pixel tone-mapping work runs on the GPU rather than across the JavaScript-to-WebAssembly call boundary.
-- An example page under a new `examples/web/` directory demonstrating playback of one of the checked-in test vectors, with a CPU fallback path for browsers that do not yet expose WebGPU.
-
-**Dependencies and blockers.**
-
-- The size of the `.wasm` artefact materially affects adoption. Aggressive `wasm-opt` passes, dead-code elimination, and a conservative `panic = "abort"` profile should keep the published artefact under approximately one megabyte compressed, which is the practical ceiling for first-paint scenarios.
-- WebGPU support is uneven across browsers: Safari shipped support recently and Firefox is still rolling out. The fallback path should use plain WebGL 2 or a CPU implementation so unsupported browsers degrade rather than fail outright.
-- The fidelity contract surface does not transfer to the browser unchanged. PSNR and SSIM can be computed in shader code; VMAF-HDR cannot. The browser build should expose only the metrics that work without external tooling.
-
-**Estimated complexity.** Moderate. Most of the work is integration with browser APIs rather than algorithmic. The compute-shader port of the tone mapper is the single largest chunk; the rest is bindings and packaging.
-
-## 3. Per-object motion tracking in dynamic metadata
+## 3. Per-object motion tracking in dynamic metadata — shipped
 
 **Goal.** Extend `ObjectMeta` so each region can carry a motion vector or trajectory descriptor across frames, allowing the per-region tone-mapping curve to follow a moving object automatically rather than requiring per-frame reauthoring.
 
 **Why this earns this slot.** The current `ObjectMeta` model is per-frame and stateless: a region painted on frame 100 has no relationship to its visual counterpart on frame 101 unless the operator copies it forward by hand. For long-form content with consistent subjects — a presenter, a vehicle, a brand mark, a recurring product placement — this is real labour. Lightweight motion metadata reduces the per-frame authoring burden materially without complicating the rendering side, and it composes cleanly with the existing `priority` and `tone_map_curve` fields.
 
-**Technical surface.**
+**Implemented surface.**
 
-- A new `motion: Option<RegionMotion>` field on `ObjectRegion`, where `RegionMotion` is an enum covering at least `Static`, `Translate { dx_per_frame: f32, dy_per_frame: f32 }`, and a short piecewise-linear or polynomial spline for non-linear paths.
-- Decoder integration so `qdrv-decode::object_tone_map::ObjectMeta::resolve_curve_at` advances the region's bounding box by the motion descriptor when a frame index between authored keyframes is rendered.
-- Validation in `qdrv-meta::object_meta::ObjectMeta::validate` so degenerate motion fields — non-finite deltas, off-canvas trajectories, or splines that violate the unit-square containment rule mid-segment — are rejected at the schema boundary rather than at render time.
+- `motion: Option<RegionMotion>` is implemented on `ObjectRegion`, with `Static { frame_count }`, `Translate { dx_per_frame, dy_per_frame, frame_count }`, and `PiecewiseLinear { keyframes }` variants. The bounded keyframe shape covers non-linear paths through explicit segmented interpolation rather than an unbounded polynomial.
+- Decoder integration uses `qdrv-meta::object_meta::ObjectMeta::resolve_curve_at_frame` from `qdrv-decode::object_tone_map` so flat regions advance their bounding box by the motion descriptor when a later frame within the authored span is rendered.
+- Validation in `qdrv-meta::object_meta::ObjectMeta::validate` rejects degenerate motion fields: zero-frame spans, non-finite deltas, malformed piecewise keyframes, and moved bounding boxes that leave the unit square.
+- `qdrv-tool` provides `qdrv object-motion`, which ingests an `ObjectMeta` JSON document, selects a rectilinear region by ID, writes a static/translated/piecewise-linear motion descriptor, validates the result, and writes the updated JSON through the existing atomic sidecar path.
 
-**Dependencies and blockers.**
+**Verification.**
 
-- A reference encoder workflow needs to exist before this feature is useful end-to-end. QDRV does not currently author object regions automatically; an upstream tool would need to produce them. A small CLI helper in `qdrv-tool` that ingests an `ObjectMeta` JSON document and interpolates motion across a frame range would be a sensible companion deliverable.
-- The schema for `RegionMotion` is the substantive design call. Polynomial splines give expressive flexibility but cost more to validate and document; pure piecewise-linear translations are simple but limit the artistic vocabulary. A two-stage approach — ship `Translate` first, add `Spline` later behind an explicit schema-version bump — keeps the surface area manageable.
+- `qdrv-meta` tests cover JSON round-trip, translated lookup, piecewise-linear interpolation, and validation failures for off-canvas, non-finite, zero-frame, and malformed-keyframe motion.
+- `qdrv-decode` tests cover applying active motion from an authored keyframe and rejecting expired motion metadata.
+- `qdrv-tool` tests cover `object-motion` CLI parsing and output generation for translated and piecewise-linear descriptors.
 
-**Estimated complexity.** Moderate. The metadata extension is small. The decoder integration is mechanically straightforward. The time sink is the design call on the motion-vector schema and the corresponding validation rules.
+**Complexity outcome.** Moderate. The metadata extension and decoder integration stayed small; the main design choice was settling on bounded segmented interpolation so validation remains finite and deterministic.
 
-## 4. ACES RRT and ODT output transforms
+## 4. ACES RRT and ODT output transforms — shipped
+
+Implemented and verified. `qdrv-core::aces` now exposes `apply_rrt`, `apply_odt_rec709_100nit`, `apply_odt_rec2020_1000nit`, and `apply_odt_rec2020_4000nit`; the implementation ports the AMPAS ACES Core v1.3 CTL RRT/ODT paths and cites the CTL source files beside the constants and transforms. `qdrv-tool` provides `qdrv aces-export`, which exports delivery-tier `.qdrv32` or mastering-tier `.qdrv64` frames as a numbered OpenEXR sequence with targets `aces2065-1`, `rec709-100nit`, `rec2020-1000nit`, and `rec2020-4000nit`.
+
+The OpenEXR path uses the pure-Rust `exr` crate with default features disabled, writes through a `.part.<pid>` temporary file, syncs the file handle, and atomically renames into the requested output filename. The ACES2065-1 interchange path has a regression test that writes OpenEXR, reads it back through the same pure-Rust EXR stack, converts back to delivery PQ, and checks QDRV's PSNR and DeltaE76 fidelity metrics. Display-rendered Rec.709/Rec.2020 ODT targets are documented as output transforms rather than reversible interchange.
 
 **Goal.** Complete the ACES integration in `qdrv-core::aces` by adding the standard ACES Reference Rendering Transform (RRT) and the canonical Output Display Transforms (ODTs), so a QDRV delivery file can produce ACES-compliant output for ingestion into ACES-aware downstream pipelines without an external conversion step.
 
@@ -74,60 +49,67 @@ The roadmap is consultative, not contractual. Priorities will shift as operator 
 
 **Technical surface.**
 
-- New functions in `qdrv-core::aces` for the RRT (`apply_rrt`) and the canonical ODTs, including at minimum `apply_odt_rec709_100nit`, `apply_odt_rec2020_1000nit`, and `apply_odt_rec2020_4000nit`.
-- A new CLI subcommand `qdrv aces-export` in `qdrv-tool` that wraps the export pipeline (`.qdrv32` → ACES OpenEXR sequence, RRT plus the operator's chosen ODT) and writes the output through the same `.part.<pid>` atomic-replace pattern used by every other QDRV writer.
-- Fidelity contracts for the QDRV → ACES → QDRV round trip so a transcode through ACES interchange preserves the documented PSNR and ΔE76 targets.
+- Functions in `qdrv-core::aces` for the RRT (`apply_rrt`) and the canonical ODTs, including `apply_odt_rec709_100nit`, `apply_odt_rec2020_1000nit`, and `apply_odt_rec2020_4000nit`.
+- A CLI subcommand `qdrv aces-export` in `qdrv-tool` that wraps the export pipeline (`.qdrv32`/`.qdrv64` to ACES OpenEXR sequence, RRT plus the operator's chosen ODT when applicable) and writes the output through the same `.part.<pid>` atomic-replace pattern used by other QDRV writers.
+- Fidelity coverage for the QDRV to ACES2065-1 OpenEXR to QDRV round trip so ACES interchange preserves the documented PSNR and DeltaE76 targets.
 
 **Dependencies and blockers.**
 
-- The ODT matrix coefficients should come from the official ACES specification (SMPTE ST 2065-1 and the ACES CTL reference implementation) rather than being re-derived from first principles. The documentation pattern established in `qdrv-core::aces` — a literal citation of the source for each matrix, with a colocated round-trip test — should be extended to every new ODT added.
-- OpenEXR write support is not currently in the workspace. The export path will need either a new dependency on an EXR-writing crate or a minimal in-repo writer for the typical scanline-RGBA case. The dependency review should follow the same scrutiny applied to `fpzip-rs` and `zfp-sys-cc`: pure-Rust where possible; C dependencies tolerated only when there is no practical alternative.
+- The ODT matrix coefficients come from the official ACES specification (SMPTE ST 2065-1 and the AMPAS ACES Core v1.3 CTL reference implementation) rather than being re-derived from first principles. The documentation pattern established in `qdrv-core::aces` now includes citations for the RRT, ODTs, AP0/AP1 matrices, and chromatic-adaptation constants.
+- OpenEXR write support is provided by the pure-Rust `exr` crate. No C dependency and no in-repository EXR byte writer are used for this feature.
 
-**Estimated complexity.** Moderate. The RRT and ODT mathematics are well-specified and the existing AP0/AP1 implementation gives a template. The time sink is the OpenEXR integration if no acceptable Rust EXR crate is available.
+**Complexity outcome.** Moderate. The RRT/ODT port is numerically dense, but the existing AP0/AP1 matrix module gave the right home for it; the OpenEXR integration is handled through a maintained pure-Rust crate rather than bespoke file-format code.
 
-## 5. AVIF still-image profile
+## 5. AVIF still-image profile — shipped
 
-**Goal.** Define a single-frame AVIF output profile (either a new `qdrv still` subcommand or a flag on the existing `qdrv mux` command) that produces an AV1-encoded HDR still image suitable for photographers and colourists working on floating-point HDR stills rather than motion content.
+**Status.** Implemented through `qdrv still` and `qdrv-mux::write_avif`.
+
+**Goal.** Define a single-frame AVIF output profile that produces an AV1-encoded HDR still image suitable for photographers and colourists working on floating-point HDR stills rather than motion content.
 
 **Why this earns this slot.** AVIF has rapidly become the practical floating-point-adjacent still-image format for HDR photography, but operators authoring in floating-point pipelines still lose precision at the encode step because most AVIF tooling assumes integer-domain mastering input. QDRV is already an AV1 mux, and the mastering-tier Float64 path already preserves precision through to the codec boundary. A still-image profile lets photographers produce AVIF assets that retain the mastering-tier precision QDRV is built around, without leaving the workspace's verification regime.
 
+**Delivered technical surface.**
+
+- `qdrv-mux::write_avif` emits a single-image ISOBMFF/AVIF file with `avif` as the major brand and `avif`, `mif1`, `miaf`, and `avis` as compatible brands, while preserving HDR `colr nclx` signalling.
+- `qdrv still` accepts delivery-tier `.qdrv32` and mastering-tier `.qdrv64` inputs, selects a frame with `--frame-index`, writes through the `.part.<pid>` atomic-replace path, and exposes `--quantizer`, `--speed`, and `--deterministic`.
+- Tests cover the AVIF writer structure plus command-level delivery and mastering exports. External validation uses GPAC MP4Box to parse and dump AVIF items and dav1d to decode the extracted AV1 image item.
+
+**Metadata and verification notes.**
+
+- QDRV metadata is stored as an `application/qdrv+json` MIME metadata item linked to the primary AV1 item from the AVIF `meta` box. The JSON preserves source container version, source tier, selected frame index, static metadata, and dynamic metadata.
+- Mastering inputs are transcoded through the existing mastering-to-delivery path before AV1 still-picture encoding, so the AVIF item uses the same delivery-domain PQ representation as the motion mux outputs.
+
+## 6. Multi-frame integration buffer for anti-flicker — shipped
+
+Implemented and verified. `TemporalStateManager` in `qdrv-decode::tone_map` now keeps a sliding ring buffer of recent frame luminance (a `VecDeque<f32>` history) together with running mean and variance aggregates, and consults them alongside the existing single-frame IIR state. When the running standard deviation over the window shows a stable scene, the controller blends the per-frame gain delta back toward the previous gain, suppressing the low-frequency "inhale-and-exhale" luminance drift that escapes single-frame smoothing; an unstable window leaves the existing high-frequency anti-pumping behaviour unchanged.
+
+The window is configured through the new optional `TemporalConstraint.integration_window_frames` field (`Option<u8>`), with a documented default of 12 frames when the field is absent; validation rejects an explicit zero. The interaction with `anti_pumping_strength` and the damping formula are documented in `docs/QDRV_TECHNICAL_REFERENCE.md` §5.4, and regression tests in `qdrv-decode::tone_map` compare windowed against non-windowed gain trajectories on drifting content. This entry is retained as a record of completed work.
+
+## 7. AI-assisted dynamic-metadata authoring
+
+**Goal.** Add an optional machine-learning path that analyses a QDRV frame range and proposes dynamic metadata — `OpenDynamicMetadataV2` tone curves and `ObjectMeta` regions — so operators can start from a generated draft instead of authoring every scene and every region by hand. The inference would live in a feature-gated `qdrv-ai` sidecar crate that never becomes a core dependency and never touches the deterministic conversion or render paths, with all model output treated as an advisory suggestion the operator reviews and edits rather than a silent transform.
+
+**Why this earns this slot.** The dynamic-metadata model already exists — `OpenDynamicMetadataV2`, the tone-curve structures, and `ObjectMeta` are all implemented — but today every curve and every region is authored manually, which is the single most labour-intensive part of using QDRV well. A model that drafts that metadata is the one "add AI" idea that fits the format's actual architecture. Unlike AV2 (see item #8), the pure-Rust infrastructure for AI inference already exists through `tract` — the pure-Rust ONNX engine from Sonos — keeping the clean-build, offline-reproducible, and near-zero-`unsafe` properties the workspace depends on. The primary blocker is obtaining a model trained for QDRV's HDR pixel domain rather than building the integration layer itself.
+
 **Technical surface.**
 
-- A new container variant (or a `qdrv mux --still` flag) that emits a single-frame ISOBMFF with the `mif1`, `avif`, and `avis` brands instead of QDRV's existing brand, while preserving the HDR `colr nclx` signalling and the metadata payload through the AVIF metadata-item boxes.
-- An accompanying CLI subcommand `qdrv still` that wraps the single-frame encode and writes a conformant `.avif` file through the same atomic-replace pattern used elsewhere in the workspace.
-- Round-trip tests against an external AVIF parser, since the workspace does not currently consume AVIF and an in-repo parser would inflate the verification surface unnecessarily.
+- A new feature-gated `qdrv-ai` companion crate that performs inference through `tract` — the pure-Rust ONNX engine from Sonos — rather than the `ort` ONNX Runtime wrapper. `tract` keeps the clean-build, offline-reproducible, and near-zero-`unsafe` properties the workspace depends on; `ort` links the native C++ ONNX Runtime and its FFI surface, which would expand the audit scope, break offline and reproducible builds, and end the workspace's current two-`unsafe`-block guarantee. The pure-Rust path is the design constraint here, not an implementation detail.
+- A `qdrv-tool` subcommand, tentatively `qdrv suggest-metadata`, that runs the model over a `.qdrv32` or `.qdrv64` frame range and writes an `OpenDynamicMetadataV2` or `ObjectMeta` JSON document through the same `.part.<pid>` atomic-replace pattern every other QDRV writer uses. The emitted document is explicitly marked as machine-suggested and remains subject to the existing creator-intent-lock semantics, so generated metadata can never silently override authored intent.
+- A pixel-domain contract: any model must operate on QDRV's actual data — 12-bit or floating-point HDR in PQ or linear light — not the 8-bit SDR range that off-the-shelf vision models assume. Inputs normalised to `[0.0, 1.0]` over an SDR distribution do not transfer to HDR content and would produce unusable suggestions.
 
 **Dependencies and blockers.**
 
-- The AVIF brand and box requirements are documented in MIAF and the AVIF specification; the muxer changes should be a small additive set rather than a parallel codepath. The existing `stco`/`co64` and `mdat` `largesize` logic remains correct without modification.
-- The metadata story for AVIF stills is the substantive design question. AVIF supports limited metadata through the `iref` and `iprp` boxes; QDRV's `DynamicMeta` and `OpenDynamicMetadataV2` are richer than AVIF accommodates natively. A decision is needed on whether to embed a JSON sidecar inside an `Exif` or `mime` item, or to drop fields that AVIF cannot represent and document the loss in the corresponding loss report.
+- The binding blocker is the model itself. No pre-trained network exists for the real task — reading HDR floating-point frames and proposing tone curves and regions — and SDR-domain models do not transfer. This requires either training a model on HDR-domain data or sourcing one. However, unlike AV2, the pure-Rust inference engine (`tract`) already exists and is GPL-compatible, so the integration work can proceed once a suitable model is obtained.
+- Determinism. Inference is not bit-reproducible across hardware, thread counts, or runtime versions, so the feature must stay outside `--deterministic`, outside the fidelity-contract paths, and outside the default build. Its output is a draft for review, never a step in a reproducible transcode.
+- Model weights are large binary artefacts that do not belong in the repository or in the deterministic verification gates. The sidecar's tests must exercise the integration with tiny fixture models or by mocking the inference boundary, so the workspace gates stay fast and reproducible whether or not a real model is present.
 
-**Estimated complexity.** Small to moderate. The codec and most of the muxer infrastructure already exist. The work concentrates on the brand-and-box differences, the metadata-embedding decisions, and the round-trip validation harness.
+**Estimated complexity.** Moderate once a suitable model exists. The in-workspace integration mirrors patterns the codebase already uses: a feature-gated crate, a single `tract` inference call, and a tool subcommand emitting reviewable JSON. Unlike AV2, the Rust infrastructure layer is available today; the remaining work is obtaining and validating a model trained for QDRV's HDR pixel domain.
 
-## 6. Multi-frame integration buffer for anti-flicker
-
-**Goal.** Augment the current single-frame temporal anti-pumping controller in `qdrv-decode::tone_map::TemporalStateManager` with a small ring-buffer-based integration window, so low-frequency luminance pumping that escapes single-frame smoothing is also suppressed.
-
-**Why this earns this slot.** The current `TemporalStateManager` is a one-frame IIR with a damping factor. The parameters documented in the workspace (`anti_pumping_strength`, `max_global_gain_delta_per_frame`) capture sensible defaults for high-frequency flicker — the kind that manifests across two or three frames and is visible as flicker proper. They do not catch low-frequency pumping: the gradual brightness drift that occurs over roughly half a second and is visible on long takes as a slow inhale-and-exhale of overall image luminance. A short ring buffer over recent frame luminance, with a proper sliding-window aggregate, would suppress that band without requiring operators to retune the existing per-frame parameters.
-
-**Technical surface.**
-
-- A new `RingBuffer<f32>` field on `TemporalStateManager` sized for the desired window length (likely 8 to 16 frames at 24 or 30 frames per second), configurable through the existing `TemporalConstraint` metadata structure via a new optional `integration_window_frames: Option<u8>` field.
-- Additional aggregate fields — running mean and running variance over the window — that the stabiliser consults alongside the existing `last_global_gain` and `last_frame_luma` state.
-- Test fixtures simulating low-frequency luminance drift so the regression coverage demonstrates the new path catches what the single-frame path misses. The existing test patterns in `qdrv-decode::tone_map` give a template for the structure.
-
-**Dependencies and blockers.**
-
-- The window size is the substantive design call. Too short and the buffer adds little over the existing IIR; too long and the controller becomes sluggish during legitimate scene transitions. Exposing `integration_window_frames` as a tunable on `TemporalConstraint` lets operators tune the controller without recompiling, while a documented default of 12 frames gives sensible behaviour out of the box.
-- The interaction with the existing `anti_pumping_strength` parameter needs careful documentation so the two controls do not compose unexpectedly. A short design note in `docs/QDRV_TECHNICAL_REFERENCE.md` describing the precedence and combined behaviour is part of the deliverable, not separate from it.
-
-**Estimated complexity.** Small. The data structure is trivial and the workspace already has the lint and test scaffolding to integrate it. The time investment is in tuning the default window size against representative content and in writing fixture-based tests that exercise the low-frequency band specifically.
-
-## 7. AV2 delivery-tier codec support
+## 8. AV2 delivery-tier codec support
 
 **Goal.** Add AV2 — the Alliance for Open Media's successor to AV1 — as an alternative delivery-tier codec alongside the current AV1 path, so a `.qdrv32` delivery stream can carry an AV2 bitstream once a production-grade Rust AV2 encoder exists, taking advantage of AV2's improved compression efficiency at equivalent perceptual quality.
 
-**Why this earns this slot.** AV2 is positioned to deliver materially better compression than AV1 at the same visual quality, which maps directly onto QDRV's delivery-tier mandate: smaller files for the same 12-bit 4:4:4 HDR content. It sits at the bottom of the list rather than higher for one decisive reason — the encoder side does not yet exist in a form QDRV can use. The decode ecosystem has moved first: rav2d, a BSD-2-Clause Rust AV2 decoder, is GPL-compatible and could eventually slot in beside the existing dav1d path. But rav1e is AV1-only, and there is no production-grade Rust AV2 encoder. Until that gap closes, QDRV could in principle read AV2 yet not produce it, which inverts the format's purpose. This is a watch-and-track item: progress is gated on an external dependency maturing, not on QDRV design effort.
+**Why this earns this slot.** AV2 is positioned to deliver materially better compression than AV1 at the same visual quality, which maps directly onto QDRV's delivery-tier mandate: smaller files for the same 12-bit 4:4:4 HDR content. However, it sits at the bottom of the list because the Rust encoder ecosystem does not yet exist in a form QDRV can use. The decode ecosystem has moved first: rav2d, a BSD-2-Clause Rust AV2 decoder, is GPL-compatible and could eventually slot in beside the existing dav1d path. But rav1e is AV1-only, and there is no production-grade Rust AV2 encoder. Until that gap closes, QDRV could in principle read AV2 yet not produce it, which inverts the format's purpose. Unlike AI (see item #7), where the pure-Rust infrastructure exists today through `tract`, AV2 has no viable pure-Rust encode path. This is a watch-and-track item: progress is gated on an external dependency maturing, not on QDRV design effort.
 
 **Technical surface.**
 
@@ -142,27 +124,7 @@ The roadmap is consultative, not contractual. Priorities will shift as operator 
 - rav2d is early-stage; its decode conformance and API stability need evaluation before it is wired into the verification gates. A decoder that cannot yet round-trip the full feature set QDRV emits is not a dependency QDRV can rely on.
 - AV2 support is strictly additive: it must not disturb the AV1 delivery path, which remains the default. The container's codec signalling and reader validation are the mechanism that keeps the two codecs from being confused.
 
-**Estimated complexity.** Currently unscoped, because it is gated on external tooling. Once a Rust AV2 encoder exists, the in-workspace integration mirrors the established AV1 path and is moderate; the real cost sits entirely outside QDRV, in the maturity of the Rust AV2 encode and decode ecosystem. Until that matures, this item stays in watch-and-track status rather than active development.
-
-## 8. AI-assisted dynamic-metadata authoring
-
-**Goal.** Add an optional machine-learning path that analyses a QDRV frame range and proposes dynamic metadata — `OpenDynamicMetadataV2` tone curves and `ObjectMeta` regions — so operators can start from a generated draft instead of authoring every scene and every region by hand. The inference would live in a feature-gated `qdrv-ai` sidecar crate that never becomes a core dependency and never touches the deterministic conversion or render paths, with all model output treated as an advisory suggestion the operator reviews and edits rather than a silent transform.
-
-**Why this earns this slot.** The dynamic-metadata model already exists — `OpenDynamicMetadataV2`, the tone-curve structures, and `ObjectMeta` are all implemented — but today every curve and every region is authored manually, which is the single most labour-intensive part of using QDRV well. A model that drafts that metadata is the one "add AI" idea that fits the format's actual architecture. It sits last for three reasons: it is a convenience layer rather than a format capability; its output cannot participate in the deterministic guarantees the rest of the toolchain makes, so it must be fenced off and strictly opt-in; and, like the AV2 item above, it is gated on an external artefact that does not yet exist — a model trained for QDRV's pixel domain.
-
-**Technical surface.**
-
-- A new feature-gated `qdrv-ai` companion crate that performs inference through `tract` — the pure-Rust ONNX engine from Sonos — rather than the `ort` ONNX Runtime wrapper. `tract` keeps the clean-build, offline-reproducible, and near-zero-`unsafe` properties the workspace depends on; `ort` links the native C++ ONNX Runtime and its FFI surface, which would expand the audit scope, break offline and reproducible builds, and end the workspace's current two-`unsafe`-block guarantee. The pure-Rust path is the design constraint here, not an implementation detail.
-- A `qdrv-tool` subcommand, tentatively `qdrv suggest-metadata`, that runs the model over a `.qdrv32` or `.qdrv64` frame range and writes an `OpenDynamicMetadataV2` or `ObjectMeta` JSON document through the same `.part.<pid>` atomic-replace pattern every other QDRV writer uses. The emitted document is explicitly marked as machine-suggested and remains subject to the existing creator-intent-lock semantics, so generated metadata can never silently override authored intent.
-- A pixel-domain contract: any model must operate on QDRV's actual data — 12-bit or floating-point HDR in PQ or linear light — not the 8-bit SDR range that off-the-shelf vision models assume. Inputs normalised to `[0.0, 1.0]` over an SDR distribution do not transfer to HDR content and would produce unusable suggestions.
-
-**Dependencies and blockers.**
-
-- The binding blocker is the model itself. No pre-trained network exists for the real task — reading HDR floating-point frames and proposing tone curves and regions — and SDR-domain models do not transfer. This requires either training a model on HDR-domain data or sourcing one, and is the direct analogue of the AV2 item's missing encoder: substantive design effort cannot begin until the external artefact exists.
-- Determinism. Inference is not bit-reproducible across hardware, thread counts, or runtime versions, so the feature must stay outside `--deterministic`, outside the fidelity-contract paths, and outside the default build. Its output is a draft for review, never a step in a reproducible transcode.
-- Model weights are large binary artefacts that do not belong in the repository or in the deterministic verification gates. The sidecar's tests must exercise the integration with tiny fixture models or by mocking the inference boundary, so the workspace gates stay fast and reproducible whether or not a real model is present.
-
-**Estimated complexity.** Currently unscoped, because — like AV2 — it is gated on external tooling, here a model trained for QDRV's HDR pixel domain. The in-workspace integration is moderate and mirrors patterns the codebase already uses: a feature-gated crate, a single `tract` inference call, and a tool subcommand emitting reviewable JSON. The genuine cost sits outside the workspace, in obtaining and validating a suitable model. Until one exists, this item stays in watch-and-track status rather than active development.
+**Estimated complexity.** Currently unscoped, because it is gated on external tooling that does not yet exist. Once a Rust AV2 encoder exists, the in-workspace integration mirrors the established AV1 path and is moderate; the real cost sits entirely outside QDRV, in the maturity of the Rust AV2 encode and decode ecosystem. Until that matures, this item stays in watch-and-track status rather than active development.
 
 ## Contribution scope
 

@@ -180,6 +180,7 @@ mod tests {
             ambient_policy: None,
             gaming_profile: None,
             inverse_tone_mapping_hint: None,
+            spherical_projection: None,
         }
     }
 

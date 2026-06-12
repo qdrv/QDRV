@@ -7,17 +7,21 @@ description            = "QDRV codec layer: AV1 (rav1e + dav1d) for delivery, fp
 rust-version.workspace = true
 
 [features]
-default = []
-# Enable ZFP reversible-mode mastering compression.
+default = ["codec"]
+# Native delivery (AV1 via rav1e + dav1d) and mastering (fpzip) codecs.
+# Build with `--no-default-features` to compile only the pure-Rust metadata
+# OBU parser — this is what the wasm32 in-browser build links against.
+codec = ["dep:rav1e", "dep:dav1d", "dep:fpzip-rs"]
+# Enable ZFP reversible-mode mastering compression (implies `codec`).
 # Requires a C compiler. Provides the best compression ratio on 2D image data.
-zfp = ["dep:zfp-sys-cc"]
+zfp = ["dep:zfp-sys-cc", "codec"]
 
 [dependencies]
 thiserror.workspace = true
 qdrv-core.workspace = true
-fpzip-rs.workspace  = true
-rav1e.workspace     = true
-dav1d.workspace     = true
+fpzip-rs   = { workspace = true, optional = true }
+rav1e      = { workspace = true, optional = true }
+dav1d      = { workspace = true, optional = true }
 # Optional ZFP reversible mode. Windows-compatible via cc crate (not cmake).
 zfp-sys-cc = { workspace = true, optional = true }
 

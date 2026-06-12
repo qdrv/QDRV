@@ -15,7 +15,7 @@
 //! | [`static_meta`] | [`StaticMeta`], [`MasteringDisplay`], [`ContentLightLevel`] |
 //! | [`dynamic_meta`] | [`DynamicMeta`], [`DisplayHint`] |
 //! | [`tone_curve`] | [`ToneMapCurve`], [`CurveAnchor`], [`CurveType`] |
-//! | [`object_meta`] | [`BoundingBox`], [`ObjectRegion`], [`ObjectMeta`] |
+//! | [`object_meta`] | [`BoundingBox`], [`MotionKeyframe`], [`ObjectRegion`], [`ObjectMeta`], [`RegionMotion`], [`SphericalRegion`], [`SphericalProjection`] |
 //! | [`open_dynamic_v2`] | [`OpenDynamicMetadataV2`] and v2 policy structures |
 //! | [`compatibility`] | Schema-version compatibility rules and `QDRV_FORMAT_VERSION` |
 //! | [`manifest`] | [`SignedMetadataManifest`], HMAC-SHA256 sign/verify |
@@ -49,7 +49,10 @@ pub use interoperability::{
 pub use manifest::{
     ManifestError, SignedMetadataManifest, sha256_hex, sign_manifest, verify_manifest,
 };
-pub use object_meta::{BoundingBox, ObjectMeta, ObjectRegion};
+pub use object_meta::{
+    BoundingBox, MotionKeyframe, ObjectMeta, ObjectRegion, RegionMotion, SphericalProjection,
+    SphericalRegion,
+};
 pub use open_dynamic_v2::{
     AmbientAdaptivePolicy, DisplayAdaptationLayer, DisplayModelClass, GamingProfile,
     InverseToneMappingHint, LocalToneMapCell, LocalToneMapGrid, ObjectConstraint,

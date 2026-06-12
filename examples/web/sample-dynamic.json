@@ -1,0 +1,23 @@
+{
+  "metadata_schema_version": 1,
+  "frame_index": 0,
+  "scene_peak_luminance_nits": 1200.0,
+  "scene_average_luminance_nits": 180.0,
+  "tone_map_curve": {
+    "type": "bezier",
+    "anchors": [
+      { "input": 0.0, "output": 0.0 },
+      { "input": 0.25, "output": 0.22 },
+      { "input": 0.5, "output": 0.48 },
+      { "input": 0.75, "output": 0.74 },
+      { "input": 1.0, "output": 1.0 }
+    ]
+  },
+  "target_display_hint": {
+    "min_luminance_nits": 0.0005,
+    "max_luminance_nits": 1000.0
+  },
+  "open_dynamic_v2": null,
+  "inverse_tone_mapping_hint": null,
+  "creator_intent_locked": false
+}

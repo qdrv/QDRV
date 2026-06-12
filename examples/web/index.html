@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QDRV browser output test harness</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+        max-width: 50rem;
+        line-height: 1.5;
+      }
+      canvas {
+        border: 1px solid #444;
+        image-rendering: pixelated;
+        width: 256px;
+        height: 256px;
+      }
+      .row {
+        display: flex;
+        gap: 2rem;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      label {
+        display: block;
+        margin: 0.4rem 0;
+      }
+      code {
+        background: #f0f0f0;
+        padding: 0 0.25rem;
+      }
+      #status {
+        min-height: 1.2em;
+        font-family: monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>QDRV browser output test harness</h1>
+    <p>
+      This example is a browser-side harness for checking what QDRV outputs look
+      like through web APIs. It runs the <code>qdrv-decode-wasm</code> tone
+      mapper (<code>tone_map_frame</code>) on a synthetic delivery-tier PQ frame,
+      using real QDRV dynamic metadata, and shares its renderer with the
+      WebCodecs/ImageDecoder/browser-image path below.
+    </p>
+    <div class="row">
+      <div>
+        <h2>Target display</h2>
+        <label
+          >Peak luminance (nits):
+          <input id="maxNits" type="number" value="600" min="1" step="50"
+        /></label>
+        <label
+          >Black level (nits):
+          <input id="minNits" type="number" value="0.1" min="0" step="0.1"
+        /></label>
+        <button id="run" disabled>Tone-map synthetic frame</button>
+        <p id="status">Loading WebAssembly...</p>
+      </div>
+      <div>
+        <h2>Output (PQ signal shown as 8-bit)</h2>
+        <canvas id="out" width="64" height="64"></canvas>
+      </div>
+    </div>
+
+    <hr />
+
+    <h2>Full browser pipeline (experimental)</h2>
+    <p>
+      Load a delivery-tier <code>.qdrv32</code> file directly, or an IVF stream
+      produced with <code>qdrv mux --format ivf</code>, to run the browser-side
+      QDRV path (metadata extraction to decoded pixels or metadata preview to
+      WebGPU/wasm tone map), reusing the target-display values above. Direct
+      <code>.qdrv32</code> still-picture payloads are wrapped as AVIF for
+      browser still-image decoding; if the browser rejects that QDRV AV1
+      profile, the harness renders a metadata preview through the same tone
+      mapper. IVF streams use <code>VideoDecoder</code>.
+    </p>
+    <input id="ivfFile" type="file" accept=".qdrv32,.ivf" />
+    <button id="playIvf" disabled>Decode &amp; tone-map</button>
+    <p id="ivfStatus"></p>
+    <canvas id="ivfOut" width="64" height="64"></canvas>
+
+    <script type="module" src="./qdrv-player.js?v=20260612-qdrv32-preview-fallback"></script>
+    <script type="module" src="./webcodecs-player.js?v=20260612-qdrv32-preview-fallback"></script>
+  </body>
+</html>

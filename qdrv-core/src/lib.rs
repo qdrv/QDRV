@@ -37,7 +37,8 @@ pub mod pq;
 
 pub use aces::{
     ACES_AP0_TO_REC2020, ACES_AP1_TO_REC2020, REC2020_TO_ACES_AP0, REC2020_TO_ACES_AP1,
-    aces_ap0_to_rec2020, aces_ap1_to_rec2020, rec2020_to_aces_ap0, rec2020_to_aces_ap1,
+    aces_ap0_to_rec2020, aces_ap1_to_rec2020, apply_odt_rec709_100nit, apply_odt_rec2020_1000nit,
+    apply_odt_rec2020_4000nit, apply_rrt, rec2020_to_aces_ap0, rec2020_to_aces_ap1,
 };
 pub use colors::{linear_to_srgb, srgb_to_linear};
 pub use error::{QdrvError, Result};

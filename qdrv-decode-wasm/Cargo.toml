@@ -1,0 +1,32 @@
+[package]
+name                   = "qdrv-decode-wasm"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description            = "WebAssembly bindings for QDRV delivery-tier tone mapping in the browser"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qdrv-core.workspace   = true
+qdrv-meta.workspace   = true
+qdrv-decode.workspace = true
+qdrv-mux.workspace    = true
+serde.workspace       = true
+# Pure-Rust ITU-T T.35 metadata OBU parser only; the native codecs stay off so
+# this still builds for wasm32. Declared by path rather than via the workspace
+# dependency because a workspace-inherited dependency cannot disable default
+# features.
+qdrv-codec            = { path = "../qdrv-codec", default-features = false }
+
+# wasm-bindgen is only needed for the wasm32 browser target. The host build
+# (and the workspace test/clippy/fmt gates) compile the codec-free core
+# without it, so adding this crate to the workspace does not change the
+# native gate surface.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

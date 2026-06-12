@@ -26,6 +26,7 @@ qdrv-codec.workspace  = true
 qdrv-io.workspace     = true
 qdrv-mux.workspace    = true
 shell-words.workspace = true
+exr.workspace         = true
 
 [lints]
 workspace = true

@@ -735,6 +735,7 @@ mod tests {
             }),
             gaming_profile: None,
             inverse_tone_mapping_hint: None,
+            spherical_projection: None,
         });
         let entry = to_hdr10plus_adaptive_entry(&meta);
         assert_eq!(entry.base.frame_index, 3);
@@ -759,6 +760,7 @@ mod tests {
                 max_gain_delta_per_frame: 0.04,
             }),
             inverse_tone_mapping_hint: None,
+            spherical_projection: None,
         });
         let entry = to_hdr10plus_gaming_entry(&meta);
         assert_eq!(entry.base.frame_index, 4);

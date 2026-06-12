@@ -7,11 +7,20 @@
 //!
 //! | Module | Tier | Codec | Notes |
 //! |--------|------|-------|-------|
-//! | [`av1`] | Delivery (Float32 PQ) | AV1 12-bit 4:4:4 via rav1e + dav1d | Always available |
-//! | [`compress`] | Mastering (Float64 linear) | fpzip | Default, pure Rust |
-//! | [`compress`] | Mastering (Float64 linear) | ZFP reversible | Optional, `zfp` feature |
-//! | [`temporal`] | Delivery (Float32 PQ) | AV1 GOP encoder with inter-frame prediction | Always available |
+//! | [`av1`] | Delivery (Float32 PQ) | AV1 12-bit 4:4:4 via rav1e + dav1d | `codec` feature (default) |
+//! | [`compress`] | Mastering (Float64 linear) | fpzip | `codec` feature (default) |
+//! | [`compress`] | Mastering (Float64 linear) | ZFP reversible | `zfp` feature |
+//! | [`temporal`] | Delivery (Float32 PQ) | AV1 GOP encoder with inter-frame prediction | `codec` feature (default) |
+//! | [`metadata_obu`] | Both | ITU-T T.35 QDRV metadata OBU embed/extract | Always available (pure Rust) |
 //! | [`error`] | n/a | [`CodecError`] error type | Always available |
+//!
+//! ## Feature flags
+//!
+//! - `codec` (default): the native rav1e/dav1d/fpzip codecs ([`av1`],
+//!   [`compress`], [`temporal`]). Build with `--no-default-features` to compile
+//!   only the pure-Rust [`metadata_obu`] parser, which is what the `wasm32`
+//!   in-browser decode build (`qdrv-decode-wasm`) links against.
+//! - `zfp`: ZFP reversible-mode mastering compression (implies `codec`).
 //!
 //! ## Why not zstd for mastering?
 //!
@@ -32,20 +41,26 @@
 //!
 //! This crate is released under the GNU General Public Licence v2.0 (GPLv2).
 
+#[cfg(feature = "codec")]
 pub mod av1;
+#[cfg(feature = "codec")]
 pub mod compress;
 pub mod error;
 pub mod metadata_obu;
+#[cfg(feature = "codec")]
 pub mod temporal;
 
+#[cfg(feature = "codec")]
 pub use av1::{
     Av1Config, Av1Decoder, ChromaSampling420, decode_frame as av1_decode,
     encode_frame as av1_encode,
 };
+#[cfg(feature = "codec")]
 pub use compress::{
     MASTERING_CODEC_FPZIP, MASTERING_CODEC_ZFP, MasteringCodec,
     compress_frame as mastering_compress, decompress_frame as mastering_decompress,
 };
 pub use error::CodecError;
 pub use metadata_obu::{embed_qdrv_metadata, extract_all_qdrv_metadata, extract_qdrv_metadata};
+#[cfg(feature = "codec")]
 pub use temporal::{EncodedPacket, GopConfig, TemporalEncoder};

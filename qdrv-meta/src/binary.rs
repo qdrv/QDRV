@@ -131,6 +131,11 @@ pub fn decode_static_binary(data: &[u8]) -> Result<StaticMeta, MetaError> {
         let end = V2_BINARY_HEADER_LEN
             .checked_add(json_len)
             .ok_or_else(|| binary_meta_error("v2 static metadata length overflow"))?;
+        if data.len() > end {
+            return Err(binary_meta_error(
+                "v2 static metadata has trailing bytes after the declared payload",
+            ));
+        }
         let payload = data
             .get(V2_BINARY_HEADER_LEN..end)
             .ok_or_else(|| binary_meta_error("truncated v2 static metadata payload"))?;
@@ -152,6 +157,11 @@ fn decode_static_binary_v1(data: &[u8]) -> Result<StaticMeta, MetaError> {
             std::io::ErrorKind::InvalidData,
             "invalid binary static metadata header",
         )));
+    }
+    if data.len() > STATIC_SIZE {
+        return Err(binary_meta_error(
+            "v1 static metadata has trailing bytes after the fixed-size record",
+        ));
     }
 
     let tier = match data[8] {
@@ -265,6 +275,11 @@ pub fn decode_dynamic_binary(data: &[u8]) -> Result<DynamicMeta, MetaError> {
         let end = V2_BINARY_HEADER_LEN
             .checked_add(json_len)
             .ok_or_else(|| binary_meta_error("v2 dynamic metadata length overflow"))?;
+        if data.len() > end {
+            return Err(binary_meta_error(
+                "v2 dynamic metadata has trailing bytes after the declared payload",
+            ));
+        }
         let payload = data
             .get(V2_BINARY_HEADER_LEN..end)
             .ok_or_else(|| binary_meta_error("truncated v2 dynamic metadata payload"))?;
@@ -324,6 +339,11 @@ fn decode_dynamic_binary_v1(data: &[u8]) -> Result<DynamicMeta, MetaError> {
             std::io::ErrorKind::InvalidData,
             "truncated anchor data",
         )));
+    }
+    if data.len() > required_len {
+        return Err(binary_meta_error(
+            "v1 dynamic metadata has trailing bytes after the declared anchors",
+        ));
     }
 
     // F-3: anchor_count is bounded ≤ MAX_TONE_MAP_ANCHORS above (32), so
@@ -431,6 +451,24 @@ mod tests {
     fn test_binary_rejects_truncated() {
         assert!(decode_static_binary(&[0u8; 10]).is_err());
         assert!(decode_dynamic_binary(&[0u8; 5]).is_err());
+    }
+
+    /// LOW-1 regression: decoders reject extra bytes after the declared payload,
+    /// so "accepted binary metadata" cannot be broader than the declared length.
+    #[test]
+    fn test_static_binary_rejects_trailing_bytes() {
+        let meta = StaticMeta::default_delivery(1000.0, 400.0);
+        let mut encoded = encode_static_binary(&meta).unwrap();
+        encoded.push(0);
+        assert!(decode_static_binary(&encoded).is_err());
+    }
+
+    #[test]
+    fn test_dynamic_binary_rejects_trailing_bytes() {
+        let meta = DynamicMeta::new(42, 1200.0, 180.0);
+        let mut encoded = encode_dynamic_binary(&meta).unwrap();
+        encoded.push(0);
+        assert!(decode_dynamic_binary(&encoded).is_err());
     }
 
     #[test]

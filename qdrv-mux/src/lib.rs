@@ -22,10 +22,12 @@
 
 use std::io::Write;
 
+pub mod avif;
 pub mod demux;
 pub mod elementary;
 pub mod fragmented;
 
+pub use avif::{AvifConfig, write_avif};
 pub use demux::extract_av1_samples;
 pub use elementary::{write_ivf, write_obu_stream};
 pub use fragmented::{write_cmaf, write_fmp4};
@@ -37,7 +39,7 @@ pub const DEFAULT_MP4_TIMESCALE: u32 = 90_000;
 const MAX_STSZ_SAMPLE_ENTRIES: usize = ((u32::MAX as usize) - 20) / 4;
 /// Maximum `mdat` payload length that still fits classic 32-bit box sizing.
 const MAX_MDAT_U32_PAYLOAD: u64 = u32::MAX as u64 - 8;
-/// Serialized `ftyp` size emitted by [`write_ftyp`].
+/// Serialised `ftyp` size emitted by [`write_ftyp`].
 const FTYP_SIZE: u32 = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +102,7 @@ fn ensure_sample_table_bounds(sample_count: usize) -> Result<(), MuxError> {
     Ok(())
 }
 
-fn mdat_header_size(payload_len: u64) -> u32 {
+pub(crate) fn mdat_header_size(payload_len: u64) -> u32 {
     if payload_len > MAX_MDAT_U32_PAYLOAD {
         16
     } else {
@@ -108,7 +110,10 @@ fn mdat_header_size(payload_len: u64) -> u32 {
     }
 }
 
-fn write_mdat_header<W: Write>(writer: &mut W, payload_len: u64) -> Result<(), MuxError> {
+pub(crate) fn write_mdat_header<W: Write>(
+    writer: &mut W,
+    payload_len: u64,
+) -> Result<(), MuxError> {
     if payload_len > MAX_MDAT_U32_PAYLOAD {
         let mdat_size = 16u64
             .checked_add(payload_len)
@@ -685,7 +690,7 @@ pub(crate) fn build_stsd(config: &Mp4Config) -> Result<Vec<u8>, MuxError> {
 /// - `transfer_characteristics = 16` (SMPTE ST 2084)
 /// - `matrix_coefficients = 9` (BT.2020 non-constant luminance)
 /// - `full_range_flag = 1` (full pixel range, matches the encoder)
-fn build_colr_nclx() -> Vec<u8> {
+pub(crate) fn build_colr_nclx() -> Vec<u8> {
     // size(4) + 'colr'(4) + 'nclx'(4) + primaries(2) + transfer(2)
     //   + matrix(2) + full_range_flag(1) = 19 bytes total
     let mut b = Vec::with_capacity(19);
@@ -700,7 +705,7 @@ fn build_colr_nclx() -> Vec<u8> {
     b
 }
 
-fn build_av1c() -> Vec<u8> {
+pub(crate) fn build_av1c() -> Vec<u8> {
     // Minimal AV1 Codec Configuration Record per
     // <https://aomediacodec.github.io/av1-isobmff/#av1codecconfigurationbox-syntax>.
     // Four payload bytes after the `av1C` four-cc:

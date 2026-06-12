@@ -2,7 +2,7 @@
 
 Author: Michael Lauzon <qdrv2026@gmail.com>
 
-This directory contains deterministic binary test artefacts used by automated integration tests in `qdrv-io`. The vectors are intentionally small and stable so that parser, writer, and transcode regressions are detected quickly in CI and local development.
+This directory contains deterministic test artefacts used by automated integration tests in `qdrv-io` and `qdrv-meta`. The vectors are intentionally small and stable so that parser, writer, transcode, and metadata regressions are detected quickly in CI and local development.
 
 ## Purpose of checked-in vectors
 
@@ -35,6 +35,20 @@ Because these files are treated as deterministic fixtures, their hashes are part
 - File size: `2,432` bytes
 - SHA-256: `0ea98a2e05db07427c9189b30281d76c20ff87670d3c768785ffd7e99e697498`
 - Test intent: parser geometry/tier checks, exact endpoint checks in mastering space, and parse-write-parse round-trip coverage
+
+### `spherical-region.objectmeta.json`
+
+- Kind: JSON metadata fixture (not a binary container vector)
+- Contents: an `ObjectMeta` carrying a single `SphericalRegion` centred
+  frame-forward (azimuth `0`, elevation `0`) under the 360°/immersive spatial
+  metadata of roadmap item 1
+- Consumed by: the `qdrv-meta` integration test `spherical_fixture`
+- Test intent: confirms the spherical metadata parses, passes
+  `ObjectMeta::validate`, round-trips losslessly through JSON, and resolves a
+  forward-facing coordinate to its region. Unlike the binary vectors above, it
+  is validated by structural assertions rather than a pinned SHA-256, because
+  spherical regions are carried in JSON metadata rather than in the `.qdrv`
+  container.
 
 ## Determinism expectations
 

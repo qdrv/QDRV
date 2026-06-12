@@ -2,7 +2,7 @@
 
 Author: Michael Lauzon <qdrv2026@gmail.com>
 
-**Version:** 0.1.0 (Working Draft)  
+**Version:** 0.1.0 (First Public Release)  
 **Licence:** GNU General Public Licence v2.0 (GPLv2)  
 **Language:** Rust (`edition = "2024"`, `rust-version = "1.96.0"`)
 
@@ -27,6 +27,7 @@ The project follows an implementation-first documentation style. In practical te
 - [CLI Usage](#cli-usage)
 - [Conformance and Test Vectors](#conformance-and-test-vectors)
 - [Interoperability, DV Adapter Boundary, and Loss Reporting](#interoperability-dv-adapter-boundary-and-loss-reporting)
+- [ACES OpenEXR Export](#aces-openexr-export)
 - [Deterministic Mode and Fidelity Contracts](#deterministic-mode-and-fidelity-contracts)
 - [Performance Notes](#performance-notes)
 - [Limitations and Non-Goals](#limitations-and-non-goals)
@@ -56,14 +57,37 @@ The feature set is organised around operational reliability rather than one-off 
 
 Another guiding choice is to keep metadata and container evolution visible instead of implicit. That is why compatibility rules are encoded directly in read/write paths and schema validation, and why interop export includes explicit loss semantics. This can feel stricter than "best effort" tools, but it gives teams a dependable baseline for reproducibility.
 
-- Two-tier floating-point video pipeline (`.qdrv64` mastering, `.qdrv32` delivery).
-- Container compatibility: read v1/v2, default write v2, optional compatibility write v1.
-- Metadata schema compatibility enforcement, including Open Dynamic Metadata v2.
-- Streaming reader (`QdrvStreamReader`) for bounded, frame-by-frame processing.
-- Deterministic conversion mode and contract-based fidelity checks.
-- Conformance corpus generation and execution tooling.
-- Interoperability exporters with explicit, machine-readable loss reporting.
-- AV1 decode state/buffer reuse and MP4 mux hardening for large payload scenarios.
+### Two-tier floating-point pipeline
+
+QDRV separates *mastering* from *delivery* so each stage keeps the precision it actually needs. The mastering tier (`.qdrv64`) stores Float64 linear-light RGB — enough analytical headroom to grade, validate, and round-trip without quantisation creeping into decision-making. The delivery tier (`.qdrv32`) carries Float32 PQ RGB at the API boundary with AV1-compressed payloads, so output stays compact and exchangeable. Keeping both tiers first-class in one toolchain removes the hidden format jumps that usually sit between source and delivery.
+
+### Explicit container and metadata compatibility
+
+Container and schema evolution is handled as a compatibility contract rather than best-effort guessing. QDRV reads both v1 and v2 containers, writes v2 by default, and can emit v1 on request for legacy consumers. Metadata rules are enforced at read/write time — static and dynamic schema versions must match, v2 must carry `open_dynamic_v2`, and v1 must not — so migrations are deliberate and ambiguous combinations fail loudly instead of drifting silently.
+
+### Per-region and 360°/immersive tone mapping
+
+Beyond the global per-frame curve, QDRV can apply tone-mapping curves to specific regions of a frame. Flat content uses rectilinear object regions (normalised bounding boxes); 360°/immersive content uses spherical regions located by azimuth and elevation, interpreted under an equirectangular, cubemap, or equi-angular cubemap projection. Overlaps resolve by priority, longitude wraps across the antimeridian, and latitude is pole-bounded — so a bright window or a forward-facing subject can be graded independently of the rest of the scene.
+
+### Streaming and memory-bounded processing
+
+`QdrvStreamReader` decodes frame-by-frame without materialising the whole file, keeping inspection, conformance, and interop work bounded on large inputs. The reader and writer enforce strict size limits before allocating (metadata, frame payloads, frame area, frame count), and the AV1 decode path reuses decoder state and scratch buffers to keep allocation churn low.
+
+### In-browser playback (WebAssembly, experimental)
+
+The `qdrv-decode-wasm` crate compiles QDRV's metadata parsing and tone mapping to WebAssembly so a delivery-tier `.qdrv32` file (or a `qdrv mux --format ivf` stream) can play in a browser with no installation. The crate is codec-free by design — the browser supplies the AV1 decode through WebCodecs `VideoDecoder` for IVF streams and through AVIF still-image decoding for direct `.qdrv32` payloads — while the wasm core validates the container, recovers the per-frame metadata, and tone-maps each frame, preferring a WebGPU compute shader with a wasm CPU fallback. A runnable demonstration page lives in [`examples/web/`](examples/web/README.md); the path is experimental and depends on the browser's AV1 Professional profile (12-bit 4:4:4) support, with a clearly labelled metadata preview when that support is absent.
+
+### Deterministic conversion and fidelity contracts
+
+`qdrv convert --deterministic` pins the processing choices (including AV1 threading) that otherwise vary run-to-run, so outputs are comparable across machines and CI runs. Fidelity contracts turn quality intent into objective pass/fail gates: `psnr_db_min`, `ssim_min`, `delta_e_max`, and optional `vmaf_hdr_min` are checked during conversion and conformance, and a contract failure aborts the operation rather than shipping a silent regression.
+
+### Conformance corpus and verification
+
+A small checked-in vector corpus with pinned SHA-256 hashes gives fast regression detection on every change, while `conformance-generate-open` / `conformance-run` build and replay larger corpora for release-gate coverage. Metadata manifests can be HMAC-SHA256 signed so a corpus reproduces and verifies byte-for-byte across environments.
+
+### Interoperability with explicit loss reporting
+
+`qdrv export-interop` emits HDR10, HDR10+, and DV-compatible artefacts alongside **machine-readable loss reports** that enumerate exactly what was dropped, approximated, or unsupported per target — interop is a reported trade-off, not a silent success/failure. The muxer writes standards-based AV1 into progressive/fragmented MP4, CMAF, IVF, and raw OBU (with HDR `colr nclx` signalling and large-payload `stco`/`co64` + `mdat largesize` handling), so output interoperates with the existing AV1 ecosystem (ffmpeg, dav1d, GPAC MP4Box, Shaka Packager) rather than requiring QDRV-specific players.
 
 ## Architecture and Crate Map
 
@@ -75,7 +99,7 @@ High-level flow:
 
 1. Mastering ingest or generation (`.qdrv64`)
 2. Optional conversion (`qdrv convert`) to delivery (`.qdrv32`)
-3. Inspect / export interop / conformance / manifest workflows
+3. Inspect / object-metadata authoring / export interop / conformance / manifest workflows
 
 Workspace crates:
 
@@ -85,9 +109,10 @@ Workspace crates:
 | `qdrv-meta` | Static/dynamic metadata, compatibility checks, v2 structures, manifests, interop models |
 | `qdrv-encode` | Mastering-to-delivery transcode path and encode options |
 | `qdrv-decode` | Tone mapping, v2 policy application, temporal anti-pumping, SDR fallback |
+| `qdrv-decode-wasm` | WebAssembly bindings for in-browser playback: `.qdrv32`/metadata parsing, YUV→PQ-RGB bridge, tone mapping, AVIF still wrapping (codec-free; the browser supplies AV1 decode) |
 | `qdrv-codec` | AV1 encode/decode (`rav1e` + `dav1d`), mastering compression (`fpzip`, optional `zfp`) |
 | `qdrv-io` | Container reader/writer, version enforcement, streaming read path, size bounds checks |
-| `qdrv-mux` | AV1 in progressive/fragmented MP4, CMAF, IVF, and raw OBU; bounds-checked ISOBMFF demuxer; `stco`/`co64`, `mdat largesize`, HDR `colr nclx` signalling |
+| `qdrv-mux` | AV1 in progressive/fragmented MP4, CMAF, AVIF still images, IVF, and raw OBU; bounds-checked ISOBMFF demuxer; `stco`/`co64`, `mdat largesize`, HDR `colr nclx` signalling |
 | `qdrv-tool` | CLI entrypoint and operator-facing workflows |
 
 The repository also ships a `test-vectors/` data directory holding the
@@ -187,24 +212,44 @@ The CLI is designed as an operator surface over crate-level capabilities: inspec
 
 Where possible, command outputs are shaped for downstream automation (for example JSON reports and deterministic vector workflows) rather than only human-readable logs. That design helps teams move from exploratory usage to repeatable validation without rewriting tooling around the CLI.
 
-The `qdrv` binary currently exposes:
+The `qdrv` binary groups its commands by workflow stage. Each is summarised below; runnable examples follow in [Representative commands](#representative-commands).
 
-- `info`
-- `pq {--nits <NITS> | --pq <PQ>}`
-- `meta-static`
-- `meta-dynamic`
-- `meta-dynamic-v2`
-- `write-test <output>`
-- `convert <input> <output>`
-- `hdr10plus <input> <output>`
-- `inspect <file>`
-- `mux <input.qdrv32> <output> [--format {mp4|fmp4|cmaf|ivf|obu}]`
-- `probe-stream <input>`
-- `export-interop <input> <output_dir>`
-- `manifest-sign <input> <output> {--key <key> | --key-file <path>} [--signer <signer>]`
-- `manifest-verify <input> <manifest> {--key <key> | --key-file <path>}`
-- `conformance-generate-open <output_dir> {--key <key> | --key-file <path> | --allow-public-default-key}`
-- `conformance-run <manifest> <output_dir> {--key <key> | --key-file <path>}`
+### Command reference
+
+#### Inspection and read-back
+
+- `info` — print a summary of the build, format, and tier defaults.
+- `pq {--nits <NITS> | --pq <PQ>}` — convert between nits and PQ signal values (the two flags are mutually exclusive).
+- `inspect <file>` — report the static and per-frame dynamic metadata of a `.qdrv` file, with optional render previews.
+- `probe-stream <input>` — read the per-frame dynamic metadata back out of an exported stream (`.mp4`/fMP4/CMAF, `.ivf`, or raw `.obu`).
+
+#### Generating and converting files
+
+- `write-test <output>` — generate a deterministic sample `.qdrv32`/`.qdrv64` fixture for testing and demos.
+- `convert <input> <output>` — transcode a mastering-tier `.qdrv64` into a delivery-tier `.qdrv32`; this is where deterministic mode, fidelity contracts, and metadata-v2 policy apply.
+
+#### ACES/OpenEXR export
+
+- `aces-export <input> <output_dir>` — export a delivery or mastering QDRV stream as a numbered OpenEXR sequence through the ACES2065-1 interchange path or through the ACES RRT/ODT target selected by `--target {aces2065-1|rec709-100nit|rec2020-1000nit|rec2020-4000nit}`.
+
+#### Metadata, HDR10+, and interop export
+
+- `meta-static`, `meta-dynamic`, `meta-dynamic-v2` — emit example static and dynamic metadata documents (including the Open Dynamic Metadata v2 shape).
+- `object-motion <input> <output> --region-id <ID>` — add bounded static, translated, or piecewise-linear motion to a rectilinear `ObjectMeta` region.
+- `hdr10plus <input> <output>` — export HDR10+ profile JSON in `basic` (default), `advanced`, `adaptive`, or `gaming` mode.
+- `export-interop <input> <output_dir>` — emit the HDR10 / HDR10+ / DV-compatible bundle plus machine-readable loss and adapter reports.
+
+#### Muxing and streaming output
+
+- `mux <input.qdrv32> <output> [--format {mp4|fmp4|cmaf|ivf|obu}]` — re-encode a delivery stream into a standards-based AV1 container: progressive MP4 (default), fragmented MP4 / CMAF for DASH/HLS, or IVF / raw OBU elementary streams for codec tooling.
+- `still <input.qdrv32|input.qdrv64> <output.avif> [--frame-index <N>]` — export one QDRV frame as an AVIF still image with HDR `colr nclx` signalling and a QDRV JSON metadata item.
+
+#### Manifests and conformance
+
+- `manifest-sign <input> <output> {--key <key> | --key-file <path>} [--signer <signer>]` — HMAC-SHA256-sign a metadata document.
+- `manifest-verify <input> <manifest> {--key <key> | --key-file <path>}` — verify a signed manifest against the same key.
+- `conformance-generate-open <output_dir> {--key <key> | --key-file <path> | --allow-public-default-key}` — build a signed conformance corpus.
+- `conformance-run <manifest> <output_dir> {--key <key> | --key-file <path>}` — replay and validate a conformance corpus.
 
 ### Signing key handling
 
@@ -237,7 +282,7 @@ with a private key. Production callers must supply their own key via
 
 `hdr10plus` mode options: `--mode basic` (default), `--mode advanced`, `--mode adaptive`, `--mode gaming` (legacy `--advanced` remains supported).
 
-Representative commands:
+### Representative commands
 
 ```bash
 # Inspect format summary
@@ -250,6 +295,11 @@ qdrv write-test sample-v1.qdrv32 --container-version v1
 
 # Mastering -> delivery conversion
 qdrv convert master.qdrv64 delivery.qdrv32 --quantizer 40 --speed 6
+
+# Export an ACES/OpenEXR image sequence. ACES2065-1 is scene-linear interchange;
+# the Rec.709 and Rec.2020 targets apply the ACES RRT/ODT display transform.
+qdrv aces-export delivery.qdrv32 aces-out --target aces2065-1 --reference-white-nits 203 --prefix shot --start-number 1
+qdrv aces-export master.qdrv64 rec709-out --target rec709-100nit --prefix grade
 
 # Export HDR10+ profile metadata (basic/advanced/adaptive/gaming)
 qdrv hdr10plus delivery.qdrv32 hdr10plus-basic.json --mode basic
@@ -270,6 +320,15 @@ qdrv export-interop delivery.qdrv32 out/
 # for DASH/HLS streaming), or ivf/obu (AV1 elementary streams for codec tooling).
 qdrv mux delivery.qdrv32 delivery.mp4 --frame-rate 24 --quantizer 40 --speed 6 --keyframe-interval 120
 qdrv mux delivery.qdrv32 delivery.cmaf --format cmaf --keyframe-interval 48
+
+# Export one delivery or mastering frame as AVIF. Mastering inputs are transcoded
+# through the delivery path before the AV1 still-image encode.
+qdrv still delivery.qdrv32 frame.avif --frame-index 0 --quantizer 40 --speed 6
+qdrv still master.qdrv64 frame-from-master.avif --frame-index 0 --deterministic
+
+# Add bounded object motion to a rectilinear ObjectMeta JSON document.
+qdrv object-motion objectmeta.json objectmeta.motion.json --region-id 7 --kind translate --frame-count 12 --to-x 0.45 --to-y 0.20
+qdrv object-motion objectmeta.json objectmeta.path.json --region-id 7 --kind piecewise-linear --keyframe 0:0:0 --keyframe 12:0.1:0.0 --keyframe 24:0.05:0.08
 
 # Read the embedded per-frame dynamic metadata back out of an exported stream.
 # QDRV carries it in-bitstream as ITU-T T.35 AV1 metadata OBUs, so it survives any container.
@@ -298,15 +357,24 @@ container framing — progressive ISOBMFF (`mp4`), fragmented MP4 / CMAF
 interoperate with the existing AV1 ecosystem rather than requiring
 QDRV-specific players. The per-frame QDRV dynamic metadata rides inside the
 AV1 bitstream as ITU-T T.35 metadata OBUs, so it travels with the stream
-through demuxing and repackaging untouched.
+through demuxing and repackaging untouched. `qdrv still` emits a single-image
+AVIF file with `avif` as the major brand and `mif1`, `miaf`, and `avis` as
+compatible brands. The primary item is an AV1 image item with the same HDR
+`colr nclx` signalling; QDRV static and dynamic metadata are preserved in an
+`application/qdrv+json` MIME metadata item linked to the primary item from the
+AVIF `meta` box.
 
 Observed acceptance against standard tooling:
 
 - **ffmpeg / ffprobe** decode and identify every format as AV1 (Professional
   profile, 12-bit 4:4:4, BT.2020 primaries, SMPTE ST 2084 transfer).
-- **dav1d** decodes the IVF and raw-OBU elementary streams.
+- **dav1d** decodes the IVF and raw-OBU elementary streams. The raw `.obu` is a low-overhead (size-delimited) OBU stream, so ffmpeg auto-detects it or decodes it with `-f obu`; the Annex-B `-f av1` demuxer does not apply.
 - **GPAC MP4Box** parses the MP4, fMP4, and CMAF outputs (`av01.2.04M.00`;
   the CMAF output carries the `cmfc` brand).
+- **GPAC MP4Box** parses AVIF still-image output, reports the primary `av01`
+  image item and the `application/qdrv+json` metadata item, and can dump both
+  items for independent inspection.
+- **dav1d** decodes the AV1 image item dumped from AVIF still-image output.
 - **Shaka Packager** repackages the output into MPEG-DASH (`.mpd`) and HLS
   (`.m3u8`) without re-encoding.
 
@@ -375,6 +443,21 @@ Certified Dolby Vision packaging is out of scope for open code in this repositor
 - `{report}`
 
 In practical production use, this means teams can integrate open interop exports as pre-flight artefacts, then hand off to proprietary toolchains where certification or closed packaging is required. The reporting layer is intended to make that hand-off auditable instead of implicit.
+
+## ACES OpenEXR Export
+
+`qdrv aces-export` closes the ACES output side of the workflow. It reads delivery-tier `.qdrv32` PQ frames or mastering-tier `.qdrv64` linear-nits frames, converts Rec. 2020 RGB into ACES AP0, and writes a numbered OpenEXR sequence through the pure-Rust `exr` crate. Output files use the same `.part.<pid>` atomic-replace pattern as other QDRV writers.
+
+Supported targets:
+
+- `aces2065-1` — scene-linear ACES AP0 interchange, with no RRT or ODT applied.
+- `rec709-100nit` — ACES RRT plus Rec.709 100 nit dim-surround ODT.
+- `rec2020-1000nit` — ACES v1.3 Rec.2020 ST2084 1000 nit published RRT+ODT transform.
+- `rec2020-4000nit` — ACES v1.3 Rec.2020 ST2084 4000 nit published RRT+ODT transform.
+
+`--reference-white-nits` defines the absolute QDRV luminance that maps to ACES scene-linear `1.0`; it must be positive and finite. `--prefix` controls the filename stem and is restricted to a filename prefix rather than a path. `--start-number` sets the first six-digit frame number.
+
+The ACES2065-1 interchange path has regression coverage that writes OpenEXR, reads it back through the same pure-Rust EXR stack, converts back to delivery PQ, and checks QDRV's existing PSNR and DeltaE76 fidelity metrics. Display-rendered Rec.709 and Rec.2020 ODT outputs are intentionally not treated as reversible interchange.
 
 ## Deterministic Mode and Fidelity Contracts
 
@@ -497,6 +580,8 @@ Primary project documentation:
 - [`docs/QDRV_TECHNICAL_REFERENCE.md`](docs/QDRV_TECHNICAL_REFERENCE.md) — implementation details and operational behaviour
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — proposed future work, ordered by expected operator impact
 - [`test-vectors/README_TEST_VECTORS.md`](test-vectors/README_TEST_VECTORS.md) — checked-in corpus details and regeneration commands
+- [`qdrv-decode-wasm/README.md`](qdrv-decode-wasm/README.md) — WebAssembly build design, exported API, and browser integration pipeline
+- [`examples/web/README.md`](examples/web/README.md) — in-browser playback demo: build, serve, and known limitations
 
 ## Licence
 

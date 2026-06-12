@@ -15,15 +15,19 @@
 //! | `meta-static`  | Print an example static stream metadata JSON block. |
 //! | `meta-dynamic` | Print an example per-frame dynamic metadata JSON block. |
 //! | `meta-dynamic-v2` | Print an example Open Dynamic Metadata v2 JSON block. |
+//! | `object-motion` | Add bounded motion metadata to an `ObjectMeta` JSON document. |
 //! | `write-test`   | Write a QDRV test-pattern file. |
 //! | `convert`      | Convert a mastering (.qdrv64) file to delivery (.qdrv32). |
 //! | `hdr10plus`    | Export HDR10+ basic/advanced/adaptive/gaming profile metadata JSON. |
 //! | `inspect`      | Read a QDRV file and print its contents to stdout. |
 //! | `mux`          | Mux a `.qdrv32` delivery file into an `.mp4` ISOBMFF container. |
+//! | `still`        | Export one QDRV frame as an AVIF still image. |
 //! | `export-interop` | Export HDR10/HDR10+/DV-compatible interoperability bundle. |
+//! | `aces-export` | Export QDRV frames as an ACES/OpenEXR sequence with RRT/ODT output transforms. |
 //! | `manifest-sign` / `manifest-verify` | Sign and verify deterministic metadata manifests. |
 //! | `conformance-generate-open` / `conformance-run` | Generate and validate deterministic open conformance corpora. |
 
+mod aces_export;
 mod conformance;
 mod fidelity_eval;
 mod interop_export;
@@ -36,6 +40,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use qdrv_codec::{
     Av1Config, ChromaSampling420, EncodedPacket, GopConfig, MasteringCodec, TemporalEncoder,
@@ -59,18 +64,20 @@ use qdrv_io::{
     },
 };
 use qdrv_meta::{
-    DynamicMeta, FidelityContract, InteropLossReport, Precision, StaticMeta, Tier, hdr10plus,
-    interoperability, manifest,
+    DynamicMeta, FidelityContract, InteropLossReport, MotionKeyframe, ObjectMeta, Precision,
+    RegionMotion, StaticMeta, Tier, hdr10plus, interoperability, manifest,
     open_dynamic_v2::{
         AmbientAdaptivePolicy, DisplayAdaptationLayer, DisplayModelClass, GamingProfile,
         InverseToneMappingHint, LocalToneMapGrid, OpenDynamicMetadataV2, TemporalConstraint,
     },
 };
 use qdrv_mux::{
-    Mp4Config, MuxFrame, write_cmaf, write_fmp4, write_ivf, write_mp4, write_obu_stream,
+    AvifConfig, Mp4Config, MuxFrame, write_avif, write_cmaf, write_fmp4, write_ivf, write_mp4,
+    write_obu_stream,
 };
 
 use crate::{
+    aces_export::{AcesExportOptions, AcesExportTargetArg, cmd_aces_export},
     conformance::{OpenVectorsConfig, generate_open_vectors, run_conformance},
     fidelity_eval::{measure_fidelity, vmaf_hdr_approximation_allowed_from_env},
     interop_export::export_interop_bundle,
@@ -137,6 +144,17 @@ enum MuxFormatArg {
     Ivf,
     /// Raw AV1 OBU elementary stream (no container), for bitstream inspection.
     Obu,
+}
+
+/// Motion descriptor emitted by `qdrv object-motion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ObjectMotionKindArg {
+    /// Keep the selected region fixed for a bounded frame span.
+    Static,
+    /// Translate the selected region by a fixed per-frame delta.
+    Translate,
+    /// Interpolate explicit normalised offsets between keyframes.
+    PiecewiseLinear,
 }
 
 /// HDR10+ export profile mode CLI selector.
@@ -211,7 +229,7 @@ const CONFORMANCE_OPEN_VECTORS_DEFAULT_KEY: &[u8] = b"qdrv-open-conformance-key"
 /// "just work" without arguments while keeping the secrets-via-`ps`
 /// concern fixed for explicit keys.
 ///
-/// An empty `--key ""` or `QDRV_SIGNING_KEY=""` (a common artifact of
+/// An empty `--key ""` or `QDRV_SIGNING_KEY=""` (a common artefact of
 /// shell scripts that try to "clear" the variable) is treated as unset
 /// here, so the documented default fires instead of failing with a
 /// confusing "empty key" error — that's the P5-1 follow-up. Operators
@@ -312,16 +330,16 @@ fn resolve_signing_key(key: Option<String>, key_file: Option<PathBuf>) -> Result
 /// destructor removes the temp file so failed writes don't leave partial
 /// outputs behind. Used by `write-test` and `convert` so an error mid-write
 /// no longer litters the output directory.
-struct TempFileGuard {
+pub(crate) struct TempFileGuard {
     path: Option<PathBuf>,
 }
 
 impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self { path: Some(path) }
     }
 
-    fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         // Infallible by type design: `commit(self)` consumes the guard, so
         // any code holding `&self` cannot have called commit. The .expect
         // exists only to satisfy the `Option` discriminant.
@@ -334,7 +352,7 @@ impl TempFileGuard {
     /// Take ownership of the path back from the guard, suppressing the
     /// cleanup that would otherwise run on drop. Call this after a
     /// successful `fs::rename` to the final destination.
-    fn commit(mut self) -> PathBuf {
+    pub(crate) fn commit(mut self) -> PathBuf {
         // Infallible: `new()` is the only constructor and always sets
         // `Some(...)`; `commit(self)` consumes so this can run at most once.
         #[allow(clippy::expect_used)]
@@ -358,7 +376,7 @@ impl Drop for TempFileGuard {
 /// that wants atomic-replace semantics. Centralising the path construction
 /// keeps the suffix consistent across `cmd_write_test`, `cmd_convert`,
 /// `cmd_mux`, and `cmd_export_interop` (DD-2 / DD-3 / GG-2 follow-ups).
-fn part_path(output: &std::path::Path) -> PathBuf {
+pub(crate) fn part_path(output: &std::path::Path) -> PathBuf {
     let ext = output
         .extension()
         .and_then(|e| e.to_str())
@@ -470,6 +488,53 @@ enum Commands {
 
     /// Print an example Open Dynamic Metadata v2 JSON block.
     MetaDynamicV2,
+
+    /// Add bounded motion metadata to one region in an ObjectMeta JSON document.
+    ObjectMotion {
+        /// Input ObjectMeta JSON file.
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+
+        /// Output ObjectMeta JSON file.
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+
+        /// Region ID to update.
+        #[arg(long)]
+        region_id: u32,
+
+        /// Motion descriptor to write.
+        #[arg(long, value_enum, default_value_t = ObjectMotionKindArg::Translate)]
+        kind: ObjectMotionKindArg,
+
+        /// Active span in frames, including the authored keyframe.
+        #[arg(long)]
+        frame_count: Option<u32>,
+
+        /// Horizontal normalised-coordinate delta per frame for translate mode.
+        #[arg(long, default_value_t = 0.0)]
+        dx_per_frame: f32,
+
+        /// Vertical normalised-coordinate delta per frame for translate mode.
+        #[arg(long, default_value_t = 0.0)]
+        dy_per_frame: f32,
+
+        /// Target left edge at the final frame; requires --to-y and --frame-count.
+        #[arg(long)]
+        to_x: Option<f32>,
+
+        /// Target top edge at the final frame; requires --to-x and --frame-count.
+        #[arg(long)]
+        to_y: Option<f32>,
+
+        /// Piecewise keyframe as FRAME_DELTA:DX:DY. Repeat for non-linear paths.
+        #[arg(long = "keyframe", value_name = "FRAME_DELTA:DX:DY")]
+        keyframes: Vec<String>,
+
+        /// Replace an existing motion descriptor on the selected region.
+        #[arg(long)]
+        overwrite: bool,
+    },
 
     /// Write a QDRV test-pattern file.
     ///
@@ -648,6 +713,39 @@ enum Commands {
         dv_tool_cmd: Option<String>,
     },
 
+    /// Export QDRV frames as an ACES/OpenEXR sequence.
+    ///
+    /// Reads a delivery-tier `.qdrv32` or mastering-tier `.qdrv64` stream,
+    /// converts Rec.2020 absolute luminance into scene-linear ACES AP0 using
+    /// `--reference-white-nits`, and writes one OpenEXR file per frame. The
+    /// selected `--target` can preserve ACES2065-1 scene-linear AP0 directly
+    /// or apply the ACES RRT plus the chosen Rec.709/Rec.2020 ODT.
+    AcesExport {
+        /// Input .qdrv32 or .qdrv64 file.
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+
+        /// Output directory for the EXR frame sequence.
+        #[arg(value_name = "OUTPUT_DIR")]
+        output_dir: PathBuf,
+
+        /// Output transform to write.
+        #[arg(long, value_enum, default_value_t = AcesExportTargetArg::Rec709100Nit)]
+        target: AcesExportTargetArg,
+
+        /// Absolute luminance that maps to scene-linear ACES value 1.0.
+        #[arg(long, default_value_t = REFERENCE_WHITE_NITS)]
+        reference_white_nits: f64,
+
+        /// File-name prefix; output files are PREFIX_000000.exr, etc.
+        #[arg(long, default_value = "frame")]
+        prefix: String,
+
+        /// First frame number used in the EXR sequence file names.
+        #[arg(long, default_value_t = 0)]
+        start_number: u32,
+    },
+
     /// Sign metadata JSON with deterministic manifest.
     ManifestSign {
         /// Input metadata JSON file.
@@ -726,6 +824,38 @@ enum Commands {
         /// `ivf`/`obu` (AV1 elementary streams for codec tooling).
         #[arg(long, value_enum, default_value = "mp4")]
         format: MuxFormatArg,
+    },
+
+    /// Export one QDRV frame as a standards-based AVIF still image.
+    ///
+    /// Accepts delivery-tier `.qdrv32` or mastering-tier `.qdrv64` input,
+    /// selects one frame with `--frame-index`, encodes it as an AV1 still
+    /// picture, and writes a HEIF/AVIF file with HDR `colr nclx` signalling
+    /// plus a QDRV JSON metadata item.
+    Still {
+        /// Input `.qdrv32` or `.qdrv64` file.
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+
+        /// Output `.avif` file.
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+
+        /// Zero-based frame index to export.
+        #[arg(long, default_value_t = 0)]
+        frame_index: u32,
+
+        /// AV1 quantiser for still-image encode (0 = lossless, 255 = lowest quality).
+        #[arg(long, default_value_t = 40)]
+        quantizer: usize,
+
+        /// rav1e speed preset for still-image encode (0 = slowest/best, 10 = fastest).
+        #[arg(long, default_value_t = 6)]
+        speed: u8,
+
+        /// Use deterministic mastering-to-delivery quantisation and single-threaded AV1 encode.
+        #[arg(long)]
+        deterministic: bool,
     },
 
     /// Read embedded QDRV dynamic metadata back out of an exported stream:
@@ -828,6 +958,31 @@ fn main() {
             cmd_meta_dynamic_v2();
             Ok(())
         }
+        Commands::ObjectMotion {
+            input,
+            output,
+            region_id,
+            kind,
+            frame_count,
+            dx_per_frame,
+            dy_per_frame,
+            to_x,
+            to_y,
+            keyframes,
+            overwrite,
+        } => cmd_object_motion(ObjectMotionOptions {
+            input: &input,
+            output: &output,
+            region_id,
+            kind,
+            frame_count,
+            dx_per_frame,
+            dy_per_frame,
+            to_x,
+            to_y,
+            keyframes: &keyframes,
+            overwrite,
+        }),
         Commands::WriteTest {
             output,
             width,
@@ -915,6 +1070,21 @@ fn main() {
             output_dir,
             dv_tool_cmd,
         } => cmd_export_interop(&input, &output_dir, dv_tool_cmd.as_deref()),
+        Commands::AcesExport {
+            input,
+            output_dir,
+            target,
+            reference_white_nits,
+            prefix,
+            start_number,
+        } => cmd_aces_export(AcesExportOptions {
+            input: &input,
+            output_dir: &output_dir,
+            target,
+            reference_white_nits,
+            prefix: &prefix,
+            start_number,
+        }),
         Commands::ManifestSign {
             input,
             output,
@@ -950,6 +1120,21 @@ fn main() {
             speed,
             keyframe_interval,
             format,
+        ),
+        Commands::Still {
+            input,
+            output,
+            frame_index,
+            quantizer,
+            speed,
+            deterministic,
+        } => cmd_still(
+            &input,
+            &output,
+            frame_index,
+            quantizer,
+            speed,
+            deterministic,
         ),
         Commands::ProbeStream { input } => cmd_probe_stream(&input),
         Commands::ConformanceGenerateOpen {
@@ -1108,6 +1293,201 @@ fn cmd_meta_dynamic_v2() {
         Ok(json) => println!("{json}"),
         Err(e) => eprintln!("Error: {e}"),
     }
+}
+
+pub(crate) struct ObjectMotionOptions<'a> {
+    input: &'a std::path::Path,
+    output: &'a std::path::Path,
+    region_id: u32,
+    kind: ObjectMotionKindArg,
+    frame_count: Option<u32>,
+    dx_per_frame: f32,
+    dy_per_frame: f32,
+    to_x: Option<f32>,
+    to_y: Option<f32>,
+    keyframes: &'a [String],
+    overwrite: bool,
+}
+
+fn cmd_object_motion(opts: ObjectMotionOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let json = fs::read_to_string(opts.input).map_err(|e| {
+        format!(
+            "cannot read ObjectMeta JSON '{}': {e}",
+            opts.input.display()
+        )
+    })?;
+    let mut meta: ObjectMeta = qdrv_meta::from_json(&json).map_err(|e| {
+        format!(
+            "cannot parse ObjectMeta JSON '{}': {e}",
+            opts.input.display()
+        )
+    })?;
+
+    let region_index = meta
+        .regions
+        .iter()
+        .position(|region| region.id == opts.region_id)
+        .ok_or_else(|| format!("object region id {} was not found", opts.region_id))?;
+
+    if meta.regions[region_index].motion.is_some() && !opts.overwrite {
+        return Err(format!(
+            "object region id {} already has motion; pass --overwrite to replace it",
+            opts.region_id
+        )
+        .into());
+    }
+
+    let base_box = meta.regions[region_index].bounding_box;
+    let motion = build_region_motion(&opts, base_box)?;
+    meta.regions[region_index].motion = Some(motion);
+    meta.validate()
+        .map_err(|e| format!("ObjectMeta validation failed after motion update: {e}"))?;
+
+    let out_json =
+        qdrv_meta::to_json(&meta).map_err(|e| format!("cannot serialise ObjectMeta JSON: {e}"))?;
+    atomic_write(opts.output, out_json.as_bytes())?;
+    println!(
+        "Wrote object motion metadata for region {}: {}",
+        opts.region_id,
+        opts.output.display()
+    );
+    Ok(())
+}
+
+fn build_region_motion(
+    opts: &ObjectMotionOptions<'_>,
+    base_box: qdrv_meta::BoundingBox,
+) -> Result<RegionMotion, Box<dyn std::error::Error>> {
+    let motion = match opts.kind {
+        ObjectMotionKindArg::Static => {
+            reject_keyframes(opts)?;
+            reject_target_endpoint(opts)?;
+            if opts.dx_per_frame != 0.0 || opts.dy_per_frame != 0.0 {
+                return Err(
+                    "--dx-per-frame/--dy-per-frame are only valid for translate mode".into(),
+                );
+            }
+            RegionMotion::Static {
+                frame_count: required_frame_count(opts.frame_count)?,
+            }
+        }
+        ObjectMotionKindArg::Translate => {
+            reject_keyframes(opts)?;
+            let frame_count = required_frame_count(opts.frame_count)?;
+            let (dx_per_frame, dy_per_frame) =
+                translate_delta_from_options(opts, base_box, frame_count)?;
+            RegionMotion::Translate {
+                dx_per_frame,
+                dy_per_frame,
+                frame_count,
+            }
+        }
+        ObjectMotionKindArg::PiecewiseLinear => {
+            if opts.frame_count.is_some() {
+                return Err("--frame-count is inferred from piecewise keyframes".into());
+            }
+            reject_target_endpoint(opts)?;
+            if opts.dx_per_frame != 0.0 || opts.dy_per_frame != 0.0 {
+                return Err(
+                    "--dx-per-frame/--dy-per-frame are only valid for translate mode".into(),
+                );
+            }
+            let keyframes = opts
+                .keyframes
+                .iter()
+                .map(|spec| parse_motion_keyframe(spec))
+                .collect::<Result<Vec<_>, _>>()?;
+            RegionMotion::PiecewiseLinear { keyframes }
+        }
+    };
+
+    motion
+        .validate_for_box(base_box)
+        .map_err(|e| format!("invalid region motion: {e}"))?;
+    Ok(motion)
+}
+
+fn required_frame_count(frame_count: Option<u32>) -> Result<u32, Box<dyn std::error::Error>> {
+    let Some(frame_count) = frame_count else {
+        return Err("--frame-count is required for static and translate motion".into());
+    };
+    if frame_count == 0 {
+        return Err("--frame-count must be greater than zero".into());
+    }
+    Ok(frame_count)
+}
+
+fn reject_keyframes(opts: &ObjectMotionOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    if !opts.keyframes.is_empty() {
+        return Err("--keyframe is only valid for piecewise-linear motion".into());
+    }
+    Ok(())
+}
+
+fn reject_target_endpoint(
+    opts: &ObjectMotionOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if opts.to_x.is_some() || opts.to_y.is_some() {
+        return Err("--to-x/--to-y are only valid for translate motion".into());
+    }
+    Ok(())
+}
+
+fn translate_delta_from_options(
+    opts: &ObjectMotionOptions<'_>,
+    base_box: qdrv_meta::BoundingBox,
+    frame_count: u32,
+) -> Result<(f32, f32), Box<dyn std::error::Error>> {
+    match (opts.to_x, opts.to_y) {
+        (Some(to_x), Some(to_y)) => {
+            if opts.dx_per_frame != 0.0 || opts.dy_per_frame != 0.0 {
+                return Err(
+                    "--to-x/--to-y cannot be combined with --dx-per-frame/--dy-per-frame".into(),
+                );
+            }
+            if frame_count < 2 {
+                return Err("endpoint interpolation requires --frame-count of at least 2".into());
+            }
+            let span = (frame_count - 1) as f32;
+            Ok(((to_x - base_box.x) / span, (to_y - base_box.y) / span))
+        }
+        (None, None) => Ok((opts.dx_per_frame, opts.dy_per_frame)),
+        _ => Err("--to-x and --to-y must be supplied together".into()),
+    }
+}
+
+fn parse_motion_keyframe(spec: &str) -> Result<MotionKeyframe, Box<dyn std::error::Error>> {
+    let mut parts = spec.split(':');
+    let Some(frame_delta) = parts.next() else {
+        return Err("keyframe must be FRAME_DELTA:DX:DY".into());
+    };
+    let Some(dx) = parts.next() else {
+        return Err("keyframe must be FRAME_DELTA:DX:DY".into());
+    };
+    let Some(dy) = parts.next() else {
+        return Err("keyframe must be FRAME_DELTA:DX:DY".into());
+    };
+    if parts.next().is_some() {
+        return Err("keyframe must be FRAME_DELTA:DX:DY".into());
+    }
+
+    let frame_delta = frame_delta
+        .parse::<u32>()
+        .map_err(|e| format!("invalid keyframe frame delta in '{spec}': {e}"))?;
+    let dx = dx
+        .parse::<f32>()
+        .map_err(|e| format!("invalid keyframe dx in '{spec}': {e}"))?;
+    let dy = dy
+        .parse::<f32>()
+        .map_err(|e| format!("invalid keyframe dy in '{spec}': {e}"))?;
+    if !dx.is_finite() || !dy.is_finite() {
+        return Err(format!("keyframe offsets must be finite in '{spec}'").into());
+    }
+    Ok(MotionKeyframe {
+        frame_delta,
+        dx,
+        dy,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,6 +2120,199 @@ fn cmd_mux(
 }
 
 // ---------------------------------------------------------------------------
+// still
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct AvifQdrvMetadata<'a> {
+    qdrv_avif_metadata_version: u8,
+    source_container_version: u16,
+    source_tier: &'a str,
+    frame_index: u64,
+    static_meta: &'a StaticMeta,
+    dynamic_meta: &'a DynamicMeta,
+}
+
+/// Export one QDRV frame as an AVIF still image.
+fn cmd_still(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    frame_index: u32,
+    quantizer: usize,
+    speed: u8,
+    deterministic: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    let in_file =
+        File::open(input).map_err(|e| format!("cannot open '{}': {e}", input.display()))?;
+    let mut stream =
+        QdrvStreamReader::new(BufReader::new(in_file)).map_err(|e| format!("read error: {e}"))?;
+    let header = stream.header().clone();
+
+    if header.frame_count == 0 {
+        return Err(format!(
+            "input '{}' declares zero frames; nothing to export",
+            input.display()
+        )
+        .into());
+    }
+    if frame_index >= header.frame_count {
+        return Err(format!(
+            "--frame-index {frame_index} is out of range for '{}' ({} frame(s))",
+            input.display(),
+            header.frame_count
+        )
+        .into());
+    }
+
+    let mut selected = None;
+    for current in 0..=frame_index {
+        selected = stream
+            .next_frame()
+            .map_err(|e| format!("read error at frame {current}: {e}"))?;
+    }
+    let frame = selected.ok_or_else(|| {
+        format!(
+            "input '{}' ended before selected frame {frame_index}",
+            input.display()
+        )
+    })?;
+
+    let source_static_meta = stream.static_meta().clone();
+    let source_tier = match header.tier {
+        TIER_DELIVERY => "delivery",
+        TIER_MASTERING => "mastering",
+        other => {
+            return Err(format!(
+                "qdrv still only accepts delivery or mastering QDRV inputs; '{}' has tier byte {other}",
+                input.display()
+            )
+            .into());
+        }
+    };
+
+    let (pixels, static_meta, dynamic_meta) = if header.tier == TIER_DELIVERY {
+        let pixels = frame
+            .pixels
+            .as_delivery()
+            .ok_or_else(|| format!("frame {frame_index} is not delivery-tier"))?
+            .to_vec();
+        (pixels, source_static_meta, frame.dynamic_meta)
+    } else {
+        let mastering_pixels = frame
+            .pixels
+            .as_mastering()
+            .ok_or_else(|| format!("frame {frame_index} is not mastering-tier"))?;
+        let delivery_static_meta = delivery_static_meta_for_still(
+            &source_static_meta,
+            qdrv_meta::compatibility::METADATA_SCHEMA_V1,
+        );
+        let encode_options = EncodeOptions {
+            deterministic,
+            ..EncodeOptions::default()
+        };
+        let result = transcode_frame_with_options(
+            mastering_pixels,
+            u64::from(frame_index),
+            delivery_static_meta,
+            &encode_options,
+        )
+        .map_err(|e| format!("transcode error on frame {frame_index}: {e}"))?;
+        (result.pixels, result.static_meta, result.dynamic_meta)
+    };
+
+    let av1_cfg = Av1Config {
+        quantizer,
+        speed,
+        lossless: quantizer == 0,
+        threads: if deterministic { 1 } else { 0 },
+        chroma: ChromaSampling420::Cs444,
+    };
+    let av1_data = av1_encode(&pixels, header.width, header.height, &av1_cfg)
+        .map_err(|e| format!("AV1 still encode failed for frame {frame_index}: {e}"))?;
+
+    let metadata = AvifQdrvMetadata {
+        qdrv_avif_metadata_version: 1,
+        source_container_version: header.version,
+        source_tier,
+        frame_index: u64::from(frame_index),
+        static_meta: &static_meta,
+        dynamic_meta: &dynamic_meta,
+    };
+    let metadata_json = serde_json::to_vec_pretty(&metadata)
+        .map_err(|e| format!("AVIF metadata serialisation failed: {e}"))?;
+
+    let tmp_path = part_path(output);
+    let tmp_guard = TempFileGuard::new(tmp_path);
+    let out_file = File::create(tmp_guard.path())
+        .map_err(|e| format!("cannot create '{}': {e}", tmp_guard.path().display()))?;
+    let mut out_writer = BufWriter::new(out_file);
+    write_avif(
+        &mut out_writer,
+        &AvifConfig::new(header.width, header.height),
+        &av1_data,
+        Some(&metadata_json),
+    )
+    .map_err(|e| format!("avif write failed: {e}"))?;
+    let out_file = out_writer
+        .into_inner()
+        .map_err(|e| format!("avif writer flush failed: {e}"))?;
+    out_file
+        .sync_all()
+        .map_err(|e| format!("avif fsync failed: {e}"))?;
+    let tmp_path = tmp_guard.commit();
+    fs::rename(&tmp_path, output).map_err(|e| {
+        format!(
+            "atomic replace '{}' -> '{}' failed: {e}",
+            tmp_path.display(),
+            output.display()
+        )
+    })?;
+
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    println!(
+        "Wrote {} (source={}, frame={}, {}x{}, AV1 {} bytes, metadata {} bytes, {:.1} ms)",
+        output.display(),
+        source_tier,
+        frame_index,
+        header.width,
+        header.height,
+        av1_data.len(),
+        metadata_json.len(),
+        elapsed_ms
+    );
+    Ok(())
+}
+
+fn delivery_static_meta_for_still(source: &StaticMeta, metadata_schema_version: u16) -> StaticMeta {
+    let mut static_meta = StaticMeta {
+        qdrv_version: source.qdrv_version.clone(),
+        metadata_schema_version,
+        tier: Tier::Delivery,
+        precision: Precision::Float32,
+        colour_standard: source.colour_standard.clone(),
+        colour_primaries: source.colour_primaries.clone(),
+        transfer_function: "st2084_pq".to_string(),
+        dynamic_metadata_standard: source.dynamic_metadata_standard.clone(),
+        chroma_subsampling: source.chroma_subsampling,
+        mastering_display: source.mastering_display.clone(),
+        content_light_level: source.content_light_level,
+        compatibility_tags: source.compatibility_tags.clone(),
+    };
+    if metadata_schema_version == qdrv_meta::compatibility::METADATA_SCHEMA_V2
+        && !static_meta
+            .compatibility_tags
+            .iter()
+            .any(|v| v == "open_dynamic_v2")
+    {
+        static_meta
+            .compatibility_tags
+            .push("open_dynamic_v2".to_string());
+    }
+    static_meta
+}
+
+// ---------------------------------------------------------------------------
 // probe-stream
 // ---------------------------------------------------------------------------
 
@@ -2358,12 +2931,14 @@ fn sample_open_dynamic_v2(
             max_global_gain_delta_per_frame: 0.08,
             anti_pumping_strength: 0.7,
             frame_time_budget_ms: frame_time_budget,
+            integration_window_frames: None,
         },
         local_tone_map_grid: Some(LocalToneMapGrid::identity(4, 4)),
         adaptation_layer,
         ambient_policy,
         gaming_profile,
         inverse_tone_mapping_hint: Some(InverseToneMappingHint::default()),
+        spherical_projection: None,
     }
 }
 
@@ -2529,7 +3104,7 @@ mod tests {
         assert_eq!(&*key, CONFORMANCE_OPEN_VECTORS_DEFAULT_KEY);
     }
 
-    /// Empty `--key` value (a common artifact of shell scripts trying to
+    /// Empty `--key` value (a common artefact of shell scripts trying to
     /// clear the variable) is still treated as unset for the
     /// fail-closed check, matching the P5-1 follow-up behaviour.
     #[test]
@@ -2625,6 +3200,307 @@ mod tests {
             Commands::Hdr10plus { advanced, .. } => assert!(advanced),
             _ => panic!("unexpected command parsed"),
         }
+    }
+
+    #[test]
+    fn aces_export_cli_parses_defaults() {
+        let cli = Cli::try_parse_from(["qdrv", "aces-export", "in.qdrv32", "aces-out"])
+            .expect("cli parse should succeed");
+        match cli.command {
+            Commands::AcesExport {
+                target,
+                reference_white_nits,
+                prefix,
+                start_number,
+                ..
+            } => {
+                assert_eq!(target, AcesExportTargetArg::Rec709100Nit);
+                assert!((reference_white_nits - REFERENCE_WHITE_NITS).abs() < f64::EPSILON);
+                assert_eq!(prefix, "frame");
+                assert_eq!(start_number, 0);
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+    }
+
+    #[test]
+    fn aces_export_cli_parses_all_targets() {
+        for (flag, expected) in [
+            ("aces2065-1", AcesExportTargetArg::Aces2065_1),
+            ("rec709-100nit", AcesExportTargetArg::Rec709100Nit),
+            ("rec2020-1000nit", AcesExportTargetArg::Rec20201000Nit),
+            ("rec2020-4000nit", AcesExportTargetArg::Rec20204000Nit),
+        ] {
+            let cli = Cli::try_parse_from([
+                "qdrv",
+                "aces-export",
+                "in.qdrv32",
+                "aces-out",
+                "--target",
+                flag,
+                "--reference-white-nits",
+                "100",
+                "--prefix",
+                "shot",
+                "--start-number",
+                "42",
+            ])
+            .unwrap_or_else(|e| panic!("--target {flag} must parse: {e}"));
+            match cli.command {
+                Commands::AcesExport {
+                    target,
+                    reference_white_nits,
+                    prefix,
+                    start_number,
+                    ..
+                } => {
+                    assert_eq!(target, expected, "--target {flag}");
+                    assert!((reference_white_nits - 100.0).abs() < f64::EPSILON);
+                    assert_eq!(prefix, "shot");
+                    assert_eq!(start_number, 42);
+                }
+                _ => panic!("unexpected command parsed"),
+            }
+        }
+    }
+
+    #[test]
+    fn still_cli_parses_defaults() {
+        let cli = Cli::try_parse_from(["qdrv", "still", "in.qdrv32", "out.avif"])
+            .expect("cli parse should succeed");
+        match cli.command {
+            Commands::Still {
+                frame_index,
+                quantizer,
+                speed,
+                deterministic,
+                ..
+            } => {
+                assert_eq!(frame_index, 0);
+                assert_eq!(quantizer, 40);
+                assert_eq!(speed, 6);
+                assert!(!deterministic);
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+    }
+
+    #[test]
+    fn still_cli_parses_options() {
+        let cli = Cli::try_parse_from([
+            "qdrv",
+            "still",
+            "in.qdrv64",
+            "out.avif",
+            "--frame-index",
+            "3",
+            "--quantizer",
+            "12",
+            "--speed",
+            "4",
+            "--deterministic",
+        ])
+        .expect("cli parse should succeed");
+        match cli.command {
+            Commands::Still {
+                frame_index,
+                quantizer,
+                speed,
+                deterministic,
+                ..
+            } => {
+                assert_eq!(frame_index, 3);
+                assert_eq!(quantizer, 12);
+                assert_eq!(speed, 4);
+                assert!(deterministic);
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+    }
+
+    #[test]
+    fn still_command_writes_avif_from_delivery_fixture() {
+        let root = make_temp_dir("still-delivery");
+        let input = root.join("in.qdrv32");
+        let output = root.join("out.avif");
+        write_delivery_fixture_sized(&input, 2, 64, 64);
+
+        cmd_still(&input, &output, 1, 40, 6, true).expect("still export should succeed");
+
+        let bytes = fs::read(&output).expect("read avif");
+        assert_eq!(&bytes[4..8], b"ftyp");
+        assert_eq!(&bytes[8..12], b"avif");
+        assert!(bytes.windows(4).any(|w| w == b"mif1"));
+        assert!(bytes.windows(4).any(|w| w == b"avis"));
+        let (meta_start, meta_end) = find_top_level_box(&bytes, b"meta").expect("meta box present");
+        let meta = &bytes[meta_start..meta_end];
+        assert!(meta.windows(4).any(|w| w == b"av01"));
+        assert!(
+            meta.windows(b"application/qdrv+json".len())
+                .any(|w| w == b"application/qdrv+json")
+        );
+        assert!(find_top_level_box(&bytes, b"mdat").is_some());
+        assert!(
+            bytes
+                .windows(b"\"source_tier\": \"delivery\"".len())
+                .any(|w| w == b"\"source_tier\": \"delivery\"")
+        );
+        assert!(
+            bytes
+                .windows(b"\"frame_index\": 1".len())
+                .any(|w| w == b"\"frame_index\": 1")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn still_command_writes_avif_from_mastering_fixture() {
+        let root = make_temp_dir("still-mastering");
+        let input = root.join("in.qdrv64");
+        let output = root.join("out.avif");
+        write_mastering_fixture_sized(&input, 1, 64, 64);
+
+        cmd_still(&input, &output, 0, 40, 6, true).expect("still export should succeed");
+
+        let bytes = fs::read(&output).expect("read avif");
+        assert_eq!(&bytes[4..8], b"ftyp");
+        assert_eq!(&bytes[8..12], b"avif");
+        assert!(find_top_level_box(&bytes, b"meta").is_some());
+        assert!(find_top_level_box(&bytes, b"mdat").is_some());
+        assert!(
+            bytes
+                .windows(b"\"source_tier\": \"mastering\"".len())
+                .any(|w| w == b"\"source_tier\": \"mastering\"")
+        );
+        assert!(
+            bytes
+                .windows(b"\"frame_index\": 0".len())
+                .any(|w| w == b"\"frame_index\": 0")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn object_motion_cli_parses_endpoint_translate() {
+        let cli = Cli::try_parse_from([
+            "qdrv",
+            "object-motion",
+            "in.objectmeta.json",
+            "out.objectmeta.json",
+            "--region-id",
+            "7",
+            "--kind",
+            "translate",
+            "--frame-count",
+            "5",
+            "--to-x",
+            "0.5",
+            "--to-y",
+            "0.25",
+        ])
+        .expect("cli parse should succeed");
+        match cli.command {
+            Commands::ObjectMotion {
+                region_id,
+                kind,
+                frame_count,
+                to_x,
+                to_y,
+                ..
+            } => {
+                assert_eq!(region_id, 7);
+                assert_eq!(kind, ObjectMotionKindArg::Translate);
+                assert_eq!(frame_count, Some(5));
+                assert_eq!(to_x, Some(0.5));
+                assert_eq!(to_y, Some(0.25));
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+    }
+
+    #[test]
+    fn object_motion_command_writes_valid_translate_descriptor() {
+        let root = make_temp_dir("object-motion-translate");
+        let input = root.join("in.objectmeta.json");
+        let output = root.join("out.objectmeta.json");
+        write_object_meta_fixture(&input);
+
+        cmd_object_motion(ObjectMotionOptions {
+            input: &input,
+            output: &output,
+            region_id: 7,
+            kind: ObjectMotionKindArg::Translate,
+            frame_count: Some(5),
+            dx_per_frame: 0.0,
+            dy_per_frame: 0.0,
+            to_x: Some(0.5),
+            to_y: Some(0.2),
+            keyframes: &[],
+            overwrite: false,
+        })
+        .expect("object-motion command should succeed");
+
+        let json = fs::read_to_string(&output).expect("read object-motion output");
+        let meta: qdrv_meta::ObjectMeta = qdrv_meta::from_json(&json).expect("parse output");
+        meta.validate().expect("output metadata should validate");
+        match meta.regions[0].motion.as_ref() {
+            Some(qdrv_meta::RegionMotion::Translate {
+                dx_per_frame,
+                dy_per_frame,
+                frame_count,
+            }) => {
+                assert!((*dx_per_frame - 0.1).abs() < f32::EPSILON);
+                assert!((*dy_per_frame - 0.0).abs() < f32::EPSILON);
+                assert_eq!(*frame_count, 5);
+            }
+            other => panic!("unexpected motion descriptor: {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn object_motion_command_writes_piecewise_descriptor() {
+        let root = make_temp_dir("object-motion-piecewise");
+        let input = root.join("in.objectmeta.json");
+        let output = root.join("out.objectmeta.json");
+        write_object_meta_fixture(&input);
+        let keyframes = vec![
+            "0:0:0".to_string(),
+            "2:0.2:0.1".to_string(),
+            "4:0.3:0.2".to_string(),
+        ];
+
+        cmd_object_motion(ObjectMotionOptions {
+            input: &input,
+            output: &output,
+            region_id: 7,
+            kind: ObjectMotionKindArg::PiecewiseLinear,
+            frame_count: None,
+            dx_per_frame: 0.0,
+            dy_per_frame: 0.0,
+            to_x: None,
+            to_y: None,
+            keyframes: &keyframes,
+            overwrite: false,
+        })
+        .expect("piecewise object-motion command should succeed");
+
+        let json = fs::read_to_string(&output).expect("read object-motion output");
+        let meta: qdrv_meta::ObjectMeta = qdrv_meta::from_json(&json).expect("parse output");
+        meta.validate().expect("output metadata should validate");
+        assert!(meta.resolve_curve_at_frame(2, 0.35, 0.35).is_some());
+        match meta.regions[0].motion.as_ref() {
+            Some(qdrv_meta::RegionMotion::PiecewiseLinear { keyframes }) => {
+                assert_eq!(keyframes.len(), 3);
+                assert_eq!(keyframes[2].frame_delta, 4);
+            }
+            other => panic!("unexpected motion descriptor: {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2972,5 +3848,85 @@ mod tests {
         .expect("write fixture");
         use std::io::Write;
         writer.flush().expect("flush fixture");
+    }
+
+    fn write_mastering_fixture_sized(path: &Path, frame_count: u64, width: u32, height: u32) {
+        let pixels = vec![
+            qdrv_core::pixel::Pixel64 {
+                r: 100.0,
+                g: 120.0,
+                b: 140.0,
+            };
+            (width * height) as usize
+        ];
+        let mut static_meta = StaticMeta::default_mastering();
+        static_meta.metadata_schema_version = qdrv_meta::compatibility::METADATA_SCHEMA_V1;
+        let mut frames = Vec::with_capacity(frame_count as usize);
+        for idx in 0..frame_count {
+            let mut dynamic = DynamicMeta::new(idx, 1000.0 + idx as f32 * 25.0, 200.0);
+            dynamic.metadata_schema_version = static_meta.metadata_schema_version;
+            frames.push(MasteringFrame {
+                dynamic_meta: dynamic,
+                pixels: pixels.clone(),
+            });
+        }
+
+        let mut writer = BufWriter::new(File::create(path).expect("create fixture"));
+        qdrv_io::writer::write_mastering_file(
+            &mut writer,
+            width,
+            height,
+            &static_meta,
+            &frames,
+            MasteringCodec::Fpzip,
+        )
+        .expect("write fixture");
+        use std::io::Write;
+        writer.flush().expect("flush fixture");
+    }
+
+    fn find_top_level_box(data: &[u8], typ: &[u8; 4]) -> Option<(usize, usize)> {
+        let mut pos = 0usize;
+        while pos.checked_add(8)? <= data.len() {
+            let header_end = pos.checked_add(8)?;
+            let size =
+                usize::try_from(u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?)).ok()?;
+            if size < 8 {
+                return None;
+            }
+            let end = pos.checked_add(size)?;
+            if end > data.len() {
+                return None;
+            }
+            if &data[pos + 4..header_end] == typ {
+                return Some((pos, end));
+            }
+            pos = end;
+        }
+        None
+    }
+
+    fn write_object_meta_fixture(path: &Path) {
+        let meta = qdrv_meta::ObjectMeta {
+            frame_index: 0,
+            regions: vec![qdrv_meta::ObjectRegion {
+                id: 7,
+                bounding_box: qdrv_meta::BoundingBox {
+                    x: 0.1,
+                    y: 0.2,
+                    width: 0.2,
+                    height: 0.2,
+                },
+                tone_map_curve: qdrv_meta::ToneMapCurve::linear(),
+                priority: 9,
+                motion: None,
+            }],
+            spherical_regions: Vec::new(),
+        };
+        fs::write(
+            path,
+            qdrv_meta::to_json(&meta).expect("serialise object meta"),
+        )
+        .expect("write object meta fixture");
     }
 }
